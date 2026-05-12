@@ -1,0 +1,64 @@
+{
+  "cases": [
+    {
+      "id": "cpu_high_usage",
+      "query": "CPU使用率高怎么处理",
+      "aliases": [
+        "CPU高告警如何排查",
+        "服务器CPU飙高怎么办",
+        "CPU高怎么处理"
+      ],
+      "relevantFileNames": [
+        "cpu_high_usage.md"
+      ]
+    },
+    {
+      "id": "memory_high_usage",
+      "query": "内存使用率高怎么处理",
+      "aliases": [
+        "内存高告警如何排查",
+        "服务器内存飙高怎么办",
+        "内存高怎么处理"
+      ],
+      "relevantFileNames": [
+        "memory_high_usage.md"
+      ]
+    },
+    {
+      "id": "disk_high_usage",
+      "query": "磁盘使用率高怎么处理",
+      "aliases": [
+        "磁盘高告警如何排查",
+        "磁盘空间不足怎么办",
+        "磁盘高怎么处理"
+      ],
+      "relevantFileNames": [
+        "disk_high_usage.md"
+      ]
+    },
+    {
+      "id": "service_unavailable",
+      "query": "服务不可用怎么处理",
+      "aliases": [
+        "服务挂了怎么排查",
+        "服务不可用告警怎么处理",
+        "服务不可访问怎么办"
+      ],
+      "relevantFileNames": [
+        "service_unavailable.md"
+      ]
+    },
+    {
+      "id": "slow_response",
+      "query": "服务响应慢怎么处理",
+      "aliases": [
+        "接口响应慢怎么排查",
+        "服务延迟高怎么办",
+        "响应时间过长怎么处理"
+      ],
+      "relevantFileNames": [
+        "slow_response.md"
+      ]
+    }
+  ]
+}
