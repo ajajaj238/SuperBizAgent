@@ -53,7 +53,7 @@ public class VectorSearchService {
                     .withVectorFieldName("vector")
                     .withVectors(Collections.singletonList(queryVector))
                     .withTopK(topK)
-                    .withMetricType(io.milvus.param.MetricType.L2)
+                    .withMetricType(io.milvus.param.MetricType.COSINE)
                     .withOutFields(List.of("id", "content", "metadata"))
                     .withParams("{\"nprobe\":10}")
                     .build();
@@ -101,7 +101,7 @@ public class VectorSearchService {
     public static class SearchResult {
         private String id;
         private String content;
-        /** 原始向量距离分数（Milvus 返回，L2 距离，越小越相似） */
+        /** 原始向量相似度分数（Milvus 返回，COSINE 相似度，越大越相似） */
         private float score;
         private String metadata;
         /** 归一化前向量相似度（由 rerank 计算，越大越相似） */

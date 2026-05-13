@@ -56,22 +56,14 @@ public class RagRerankService {
 
         Set<String> queryTokens = tokenize(query);
         List<VectorSearchService.SearchResult> scored = new ArrayList<>(candidates);
-        double maxVectorSim = 0.0;
 
         for (VectorSearchService.SearchResult item : scored) {
             double vectorSim = toSimilarity(item.getScore());
             item.setVectorSimilarity((float) vectorSim);
-            if (vectorSim > maxVectorSim) {
-                maxVectorSim = vectorSim;
-            }
-        }
-
-        if (maxVectorSim <= 0.0) {
-            maxVectorSim = 1.0;
         }
 
         for (VectorSearchService.SearchResult item : scored) {
-            double vectorNorm = safe(item.getVectorSimilarity()) / maxVectorSim;
+            double vectorNorm = safe(item.getVectorSimilarity());
             double keywordCoverage = keywordCoverage(queryTokens, item.getContent());
             double fused = vectorWeight * vectorNorm + keywordWeight * keywordCoverage;
 
@@ -113,9 +105,16 @@ public class RagRerankService {
         return new ArrayList<>(input.subList(0, finalTopK));
     }
 
-    private double toSimilarity(float distance) {
-        // Milvus L2 距离越小越相似，转成 (0,1] 区间的相似度。
-        return 1.0 / (1.0 + Math.max(distance, 0.0f));
+    private double toSimilarity(float score) {
+        // Milvus COSINE 分数通常在 [-1, 1]，映射到 [0, 1] 便于与关键词分数融合。
+        double normalized = (score + 1.0) / 2.0;
+        if (normalized < 0.0) {
+            return 0.0;
+        }
+        if (normalized > 1.0) {
+            return 1.0;
+        }
+        return normalized;
     }
 
     private double keywordCoverage(Set<String> queryTokens, String content) {
