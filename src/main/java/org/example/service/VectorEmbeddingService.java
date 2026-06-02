@@ -38,6 +38,7 @@ public class VectorEmbeddingService {
     private final TokenUsageRecorder tokenUsageRecorder;
 
     private TextEmbedding textEmbedding;
+    private static final int MAX_BATCH_SIZE = 10;
 
     public VectorEmbeddingService(TokenUsageRecorder tokenUsageRecorder) {
         this.tokenUsageRecorder = tokenUsageRecorder;
@@ -169,6 +170,19 @@ public class VectorEmbeddingService {
             }
 
             logger.info("开始批量生成向量嵌入, 数量: {}", contents.size());
+
+            if (contents.size() > MAX_BATCH_SIZE) {
+                List<List<Float>> allEmbeddings = new ArrayList<>();
+                for (int start = 0; start < contents.size(); start += MAX_BATCH_SIZE) {
+                    int end = Math.min(start + MAX_BATCH_SIZE, contents.size());
+                    logger.info("批量向量化分片: {}/{} - {} 条",
+                            (start / MAX_BATCH_SIZE) + 1,
+                            (contents.size() + MAX_BATCH_SIZE - 1) / MAX_BATCH_SIZE,
+                            end - start);
+                    allEmbeddings.addAll(generateEmbeddings(contents.subList(start, end)));
+                }
+                return allEmbeddings;
+            }
             
             // 确保 API Key 已设置
             if (Constants.apiKey == null || Constants.apiKey.isEmpty()) {

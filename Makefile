@@ -78,10 +78,10 @@ start:
 		echo "$(YELLOW)   日志文件: server.log$(NC)"; \
 	fi
 
-# 等待服务器就绪（最多等待 60 秒）
+# 等待服务器就绪（最多等待 180 秒）
 wait:
 	@echo "$(YELLOW)⏳ 等待服务器就绪...$(NC)"
-	@max_attempts=60; \
+	@max_attempts=180; \
 	attempt=0; \
 	while [ $$attempt -lt $$max_attempts ]; do \
 		if curl -s -f $(HEALTH_CHECK_API) > /dev/null 2>&1; then \

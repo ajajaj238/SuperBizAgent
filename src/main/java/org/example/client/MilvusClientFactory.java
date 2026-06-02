@@ -60,6 +60,8 @@ public class MilvusClientFactory {
                 logger.info("collection '{}' 已存在", MilvusConstants.MILVUS_COLLECTION_NAME);
             }
 
+            initializeIntentExamplesCollection(client);
+
             return client;
 
         } catch (Exception e) {
@@ -175,5 +177,132 @@ public class MilvusClientFactory {
         }
         
         logger.info("成功为 vector 字段创建索引");
+    }
+
+    /**
+     * 创建 intent_examples collection（方案 A）
+     */
+    private void createIntentExamplesCollection(MilvusServiceClient client) {
+        FieldType idField = FieldType.newBuilder()
+                .withName("id")
+                .withDataType(DataType.Int64)
+                .withPrimaryKey(true)
+                .withAutoID(true)
+                .build();
+
+        FieldType intentField = FieldType.newBuilder()
+                .withName("intent")
+                .withDataType(DataType.VarChar)
+                .withMaxLength(MilvusConstants.INTENT_MAX_LENGTH)
+                .build();
+
+        FieldType exampleField = FieldType.newBuilder()
+                .withName("example")
+                .withDataType(DataType.VarChar)
+                .withMaxLength(MilvusConstants.INTENT_EXAMPLE_MAX_LENGTH)
+                .build();
+
+        FieldType embeddingField = FieldType.newBuilder()
+                .withName("embedding")
+                .withDataType(DataType.FloatVector)
+                .withDimension(MilvusConstants.VECTOR_DIM)
+                .build();
+
+        CollectionSchemaParam schema = CollectionSchemaParam.newBuilder()
+                .withEnableDynamicField(false)
+                .addFieldType(idField)
+                .addFieldType(intentField)
+                .addFieldType(exampleField)
+                .addFieldType(embeddingField)
+                .build();
+
+        CreateCollectionParam createParam = CreateCollectionParam.newBuilder()
+                .withCollectionName(MilvusConstants.INTENT_EXAMPLES_COLLECTION_NAME)
+                .withDescription("Intent seed examples collection")
+                .withSchema(schema)
+                .withShardsNum(MilvusConstants.DEFAULT_SHARD_NUMBER)
+                .build();
+
+        R<RpcStatus> response = client.createCollection(createParam);
+        if (response.getStatus() != 0) {
+            if (isAlreadyExistsError(response.getMessage())) {
+                logger.info("intent_examples collection 已存在，跳过创建");
+                return;
+            }
+            throw new RuntimeException("创建 intent_examples collection 失败: " + response.getMessage());
+        }
+    }
+
+    /**
+     * 为 intent_examples.embedding 创建索引
+     */
+    private void createIntentExamplesIndex(MilvusServiceClient client) {
+        CreateIndexParam indexParam = CreateIndexParam.newBuilder()
+                .withCollectionName(MilvusConstants.INTENT_EXAMPLES_COLLECTION_NAME)
+                .withFieldName("embedding")
+                .withIndexType(IndexType.IVF_FLAT)
+                .withMetricType(MetricType.COSINE)
+                .withExtraParam("{\"nlist\":128}")
+                .withSyncMode(Boolean.FALSE)
+                .build();
+
+        R<RpcStatus> response = client.createIndex(indexParam);
+        if (response.getStatus() != 0) {
+            if (isAlreadyExistsError(response.getMessage())) {
+                logger.info("intent_examples.embedding 索引已存在，跳过创建");
+                return;
+            }
+            throw new RuntimeException("创建 intent_examples.embedding 索引失败: " + response.getMessage());
+        }
+    }
+
+    /**
+     * 意图识别 collection 是优化层：初始化失败不能阻塞主服务启动。
+     * Milvus 刚启动时偶发 proxy 元数据刷新错误，重试后通常可恢复。
+     */
+    private void initializeIntentExamplesCollection(MilvusServiceClient client) {
+        int maxAttempts = 3;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                if (!collectionExists(client, MilvusConstants.INTENT_EXAMPLES_COLLECTION_NAME)) {
+                    logger.info("collection '{}' 不存在，正在创建... attempt={}/{}",
+                            MilvusConstants.INTENT_EXAMPLES_COLLECTION_NAME, attempt, maxAttempts);
+                    createIntentExamplesCollection(client);
+                    logger.info("成功创建 collection '{}'", MilvusConstants.INTENT_EXAMPLES_COLLECTION_NAME);
+                } else {
+                    logger.info("collection '{}' 已存在", MilvusConstants.INTENT_EXAMPLES_COLLECTION_NAME);
+                }
+
+                createIntentExamplesIndex(client);
+                logger.info("成功创建或确认 intent_examples 索引");
+                return;
+            } catch (Exception e) {
+                if (attempt == maxAttempts) {
+                    logger.warn("intent_examples 初始化失败，应用将继续启动，意图识别会自动降级: {}", e.getMessage());
+                    return;
+                }
+                logger.warn("intent_examples 初始化失败，准备重试: attempt={}/{}, error={}",
+                        attempt, maxAttempts, e.getMessage());
+                sleepBeforeRetry(attempt);
+            }
+        }
+    }
+
+    private void sleepBeforeRetry(int attempt) {
+        try {
+            Thread.sleep(2000L * attempt);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private boolean isAlreadyExistsError(String message) {
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase();
+        return normalized.contains("already exist")
+                || normalized.contains("already_exists")
+                || normalized.contains("duplicated");
     }
 }

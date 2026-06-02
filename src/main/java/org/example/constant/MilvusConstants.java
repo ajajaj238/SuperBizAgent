@@ -11,6 +11,11 @@ public class MilvusConstants {
      * Milvus 集合名称
      */
     public static final String MILVUS_COLLECTION_NAME = "biz";
+
+    /**
+     * 意图示例集合名称（独立 collection，避免与 RAG 文档混存）
+     */
+    public static final String INTENT_EXAMPLES_COLLECTION_NAME = "intent_examples";
     
     /**
      * 向量维度（豆包 embedding 模型的维度）
@@ -26,6 +31,16 @@ public class MilvusConstants {
      * Content字段最大长度
      */
     public static final int CONTENT_MAX_LENGTH = 8192;
+
+    /**
+     * 意图字段最大长度
+     */
+    public static final int INTENT_MAX_LENGTH = 32;
+
+    /**
+     * 意图示例文本最大长度
+     */
+    public static final int INTENT_EXAMPLE_MAX_LENGTH = 512;
     
     /**
      * 默认分片数

@@ -149,6 +149,24 @@ public class TokenUsageRecorder {
         tokenLogger.info(toJson(detail));
     }
 
+    public void recordIntent(String sessionId, String intent, double confidence, String method, String reason) {
+        Counter.builder("ai_intent_classification_total")
+                .tag("intent", sanitizeTag(intent))
+                .tag("method", sanitizeTag(method))
+                .register(meterRegistry)
+                .increment();
+
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("event", "ai_intent_classification");
+        detail.put("traceId", TokenUsageContext.currentTraceId());
+        detail.put("sessionId", sessionId);
+        detail.put("intent", intent);
+        detail.put("confidence", confidence);
+        detail.put("method", method);
+        detail.put("reason", reason);
+        tokenLogger.info(toJson(detail));
+    }
+
     public void recordChatExchange(String traceId, String model, String promptText, String responseText, String mode) {
         Map<String, Object> detail = new LinkedHashMap<>();
         detail.put("event", "ai_llm_exchange");

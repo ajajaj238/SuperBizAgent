@@ -13,10 +13,14 @@ import lombok.Setter;
 import org.example.monitor.TokenUsageRecorder;
 import org.example.service.AiOpsService;
 import org.example.service.ChatService;
+import org.example.service.intent.HybridIntentClassifier;
+import org.example.service.intent.IntentResult;
+import org.example.service.intent.SessionIntentTracker;
+import org.example.service.intent.ToolFilter;
+import org.example.service.intent.UserIntent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -49,10 +53,13 @@ public class ChatController {
     private ChatService chatService;
 
     @Autowired
-    private ToolCallbackProvider tools;
+    private TokenUsageRecorder tokenUsageRecorder;
 
     @Autowired
-    private TokenUsageRecorder tokenUsageRecorder;
+    private HybridIntentClassifier intentClassifier;
+
+    @Autowired
+    private SessionIntentTracker intentTracker;
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
 
@@ -85,9 +92,29 @@ public class ChatController {
             List<Map<String, String>> history = session.getHistory();
             logger.info("会话历史消息对数: {}", history.size() / 2);
 
+            IntentResult intentResult = intentClassifier.classify(request.getQuestion(), session.getSessionId(), history);
+            recordIntent(session.getSessionId(), intentResult);
+
+            if (intentResult.getIntent() == UserIntent.SYSTEM_OPERATION) {
+                String answer = handleSystemOperation(session);
+                tokenUsageRecorder.completeConversationSuccess(answer.length());
+                return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(answer)));
+            }
+
+            if (intentResult.getIntent() == UserIntent.ALERT_DIAGNOSIS) {
+                String report = executeAiOpsReport();
+                session.addMessage(request.getQuestion(), report, chatService);
+                tokenUsageRecorder.completeConversationSuccess(report.length());
+                return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(report)));
+            }
+
             // 创建 DashScope API 和 ChatModel
             DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-            DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+            DashScopeChatModel chatModel = chatService.createChatModel(
+                    dashScopeApi,
+                    chatService.temperatureForIntent(intentResult.getIntent()),
+                    2000,
+                    0.9);
 
             // 记录可用工具
             chatService.logAvailableTools();
@@ -95,14 +122,20 @@ public class ChatController {
             logger.info("开始 ReactAgent 对话（支持自动工具调用）");
             
             // 构建系统提示词（包含历史消息）
-            String systemPrompt = chatService.buildSystemPrompt(history);
+            String systemPrompt = intentResult.getIntent() == UserIntent.AMBIGUOUS
+                    ? chatService.buildSystemPrompt(history)
+                    : chatService.buildIntentSystemPrompt(intentResult.getIntent());
             var monitoredChatModel = chatService.createMonitoredChatModel(chatModel);
             
             // 创建 ReactAgent
-            ReactAgent agent = chatService.createReactAgent(monitoredChatModel, systemPrompt);
+            ToolFilter toolFilter = chatService.toolFilterForIntent(intentResult.getIntent());
+            ReactAgent agent = chatService.createReactAgent(monitoredChatModel, systemPrompt, toolFilter);
 
             // 每次回答前先执行 RAG 预检索，再将检索结果注入问题上下文
-            String enrichedQuestion = chatService.buildAgentUserPrompt(history, request.getQuestion());
+            String enrichedQuestion = chatService.buildAgentUserPrompt(
+                    history,
+                    request.getQuestion(),
+                    chatService.shouldEnableRag(intentResult.getIntent()));
             
             // 执行对话
             String fullAnswer = chatService.executeChat(agent, monitoredChatModel, systemPrompt, enrichedQuestion);
@@ -139,6 +172,7 @@ public class ChatController {
             SessionInfo session = sessions.get(request.getId());
             if (session != null) {
                 session.clearHistory();
+                intentTracker.clear(request.getId());
                 return ResponseEntity.ok(ApiResponse.success("会话历史已清空"));
             } else {
                 return ResponseEntity.ok(ApiResponse.error("会话不存在"));
@@ -182,9 +216,38 @@ public class ChatController {
                 List<Map<String, String>> history = session.getHistory();
                 logger.info("ReactAgent 会话历史消息对数: {}", history.size() / 2);
 
+                IntentResult intentResult = intentClassifier.classify(request.getQuestion(), session.getSessionId(), history);
+                recordIntent(session.getSessionId(), intentResult);
+
+                if (intentResult.getIntent() == UserIntent.SYSTEM_OPERATION) {
+                    String answer = handleSystemOperation(session);
+                    emitter.send(SseEmitter.event()
+                            .name("message")
+                            .data(SseMessage.content(answer), MediaType.APPLICATION_JSON));
+                    tokenUsageRecorder.completeConversationSuccess(answer.length());
+                    emitter.send(SseEmitter.event()
+                            .name("message")
+                            .data(SseMessage.done(), MediaType.APPLICATION_JSON));
+                    emitter.complete();
+                    return;
+                }
+
+                if (intentResult.getIntent() == UserIntent.ALERT_DIAGNOSIS) {
+                    streamAiOpsReport(emitter);
+                    String answer = "已通过 AIOps 多 Agent 生成告警分析报告。";
+                    session.addMessage(request.getQuestion(), answer, chatService);
+                    tokenUsageRecorder.completeConversationSuccess(answer.length());
+                    emitter.complete();
+                    return;
+                }
+
                 // 创建 DashScope API 和 ChatModel
                 DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+                DashScopeChatModel chatModel = chatService.createChatModel(
+                        dashScopeApi,
+                        chatService.temperatureForIntent(intentResult.getIntent()),
+                        2000,
+                        0.9);
 
                 // 记录可用工具
                 chatService.logAvailableTools();
@@ -192,14 +255,20 @@ public class ChatController {
                 logger.info("开始 ReactAgent 流式对话（支持自动工具调用）");
                 
                 // 构建系统提示词（包含历史消息）
-                String systemPrompt = chatService.buildSystemPrompt(history);
+                String systemPrompt = intentResult.getIntent() == UserIntent.AMBIGUOUS
+                        ? chatService.buildSystemPrompt(history)
+                        : chatService.buildIntentSystemPrompt(intentResult.getIntent());
                 var monitoredChatModel = chatService.createMonitoredChatModel(chatModel);
                 
                 // 创建 ReactAgent
-                ReactAgent agent = chatService.createReactAgent(monitoredChatModel, systemPrompt);
+                ToolFilter toolFilter = chatService.toolFilterForIntent(intentResult.getIntent());
+                ReactAgent agent = chatService.createReactAgent(monitoredChatModel, systemPrompt, toolFilter);
 
                 // 每次回答前先执行 RAG 预检索，再将检索结果注入问题上下文
-                String enrichedQuestion = chatService.buildAgentUserPrompt(history, request.getQuestion());
+                String enrichedQuestion = chatService.buildAgentUserPrompt(
+                        history,
+                        request.getQuestion(),
+                        chatService.shouldEnableRag(intentResult.getIntent()));
                 
                 // 用于累积完整答案
                 StringBuilder fullAnswerBuilder = new StringBuilder();
@@ -339,7 +408,7 @@ public class ChatController {
                                 .build())
                         .build();
 
-                ToolCallback[] toolCallbacks = tools.getToolCallbacks();
+                ToolCallback[] toolCallbacks = chatService.getToolCallbacks();
 
                 emitter.send(SseEmitter.event().name("message").data(SseMessage.content("正在读取告警并拆解任务...\n")));
                 
@@ -438,6 +507,95 @@ public class ChatController {
     }
 
     // ==================== 辅助方法 ====================
+
+    private void recordIntent(String sessionId, IntentResult intentResult) {
+        logger.info("意图识别完成: sessionId={}, intent={}, confidence={}, method={}, reason={}",
+                sessionId,
+                intentResult.getIntent(),
+                String.format("%.3f", intentResult.getConfidence()),
+                intentResult.getMethod(),
+                intentResult.getReason());
+        intentTracker.record(sessionId, intentResult);
+        tokenUsageRecorder.recordIntent(
+                sessionId,
+                intentResult.getIntent().name(),
+                intentResult.getConfidence(),
+                intentResult.getMethod(),
+                intentResult.getReason());
+    }
+
+    private String handleSystemOperation(SessionInfo session) {
+        session.clearHistory();
+        intentTracker.clear(session.getSessionId());
+        return "会话历史已清空。";
+    }
+
+    private String executeAiOpsReport() throws Exception {
+        DashScopeApi dashScopeApi = chatService.createDashScopeApi();
+        DashScopeChatModel chatModel = DashScopeChatModel.builder()
+                .dashScopeApi(dashScopeApi)
+                .defaultOptions(DashScopeChatOptions.builder()
+                        .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
+                        .withTemperature(0.3)
+                        .withMaxToken(8000)
+                        .withTopP(0.9)
+                        .build())
+                .build();
+
+        Optional<OverAllState> state = aiOpsService.executeAiOpsAnalysis(chatModel, chatService.getToolCallbacks());
+        if (state.isEmpty()) {
+            return "AIOps 多 Agent 编排未获取到有效结果。";
+        }
+        return aiOpsService.extractFinalReport(state.get())
+                .orElse("AIOps 多 Agent 流程已完成，但未能生成最终报告。");
+    }
+
+    private void streamAiOpsReport(SseEmitter emitter) throws Exception {
+        DashScopeApi dashScopeApi = chatService.createDashScopeApi();
+        DashScopeChatModel chatModel = DashScopeChatModel.builder()
+                .dashScopeApi(dashScopeApi)
+                .defaultOptions(DashScopeChatOptions.builder()
+                        .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
+                        .withTemperature(0.3)
+                        .withMaxToken(8000)
+                        .withTopP(0.9)
+                        .build())
+                .build();
+
+        emitter.send(SseEmitter.event().name("message")
+                .data(SseMessage.content("正在读取告警并拆解任务...\n"), MediaType.APPLICATION_JSON));
+
+        Optional<OverAllState> overAllStateOptional = aiOpsService.executeAiOpsAnalysis(chatModel, chatService.getToolCallbacks());
+        if (overAllStateOptional.isEmpty()) {
+            emitter.send(SseEmitter.event().name("message")
+                    .data(SseMessage.error("多 Agent 编排未获取到有效结果"), MediaType.APPLICATION_JSON));
+            emitter.send(SseEmitter.event().name("message").data(SseMessage.done(), MediaType.APPLICATION_JSON));
+            return;
+        }
+
+        Optional<String> finalReportOptional = aiOpsService.extractFinalReport(overAllStateOptional.get());
+        if (finalReportOptional.isPresent()) {
+            String finalReportText = finalReportOptional.get();
+            emitter.send(SseEmitter.event().name("message")
+                    .data(SseMessage.content("\n\n" + "=".repeat(60) + "\n"), MediaType.APPLICATION_JSON));
+            emitter.send(SseEmitter.event().name("message")
+                    .data(SseMessage.content("**告警分析报告**\n\n"), MediaType.APPLICATION_JSON));
+
+            int chunkSize = 50;
+            for (int i = 0; i < finalReportText.length(); i += chunkSize) {
+                int end = Math.min(i + chunkSize, finalReportText.length());
+                emitter.send(SseEmitter.event().name("message")
+                        .data(SseMessage.content(finalReportText.substring(i, end)), MediaType.APPLICATION_JSON));
+            }
+            emitter.send(SseEmitter.event().name("message")
+                    .data(SseMessage.content("\n" + "=".repeat(60) + "\n\n"), MediaType.APPLICATION_JSON));
+        } else {
+            emitter.send(SseEmitter.event().name("message")
+                    .data(SseMessage.content("多 Agent 流程已完成，但未能生成最终报告。"), MediaType.APPLICATION_JSON));
+        }
+
+        emitter.send(SseEmitter.event().name("message").data(SseMessage.done(), MediaType.APPLICATION_JSON));
+    }
 
     private SessionInfo getOrCreateSession(String sessionId) {
         if (sessionId == null || sessionId.isEmpty()) {

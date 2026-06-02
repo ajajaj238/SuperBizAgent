@@ -3,6 +3,8 @@ package org.example.service;
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.SearchResults;
 import io.milvus.param.R;
+import io.milvus.param.RpcStatus;
+import io.milvus.param.collection.LoadCollectionParam;
 import io.milvus.param.dml.SearchParam;
 import io.milvus.response.SearchResultsWrapper;
 import lombok.Getter;
@@ -93,6 +95,55 @@ public class VectorSearchService {
         }
     }
 
+    public List<IntentSearchResult> searchIntentExamples(String query, int topK) {
+        try {
+            logger.info("开始搜索意图示例, 查询: {}, topK: {}", query, topK);
+
+            List<Float> queryVector = embeddingService.generateQueryVector(query);
+
+            R<RpcStatus> loadResponse = milvusClient.loadCollection(
+                    LoadCollectionParam.newBuilder()
+                            .withCollectionName(MilvusConstants.INTENT_EXAMPLES_COLLECTION_NAME)
+                            .build()
+            );
+            if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
+                throw new RuntimeException("加载 intent_examples collection 失败: " + loadResponse.getMessage());
+            }
+
+            SearchParam searchParam = SearchParam.newBuilder()
+                    .withCollectionName(MilvusConstants.INTENT_EXAMPLES_COLLECTION_NAME)
+                    .withVectorFieldName("embedding")
+                    .withVectors(Collections.singletonList(queryVector))
+                    .withTopK(topK)
+                    .withMetricType(io.milvus.param.MetricType.COSINE)
+                    .withOutFields(List.of("intent", "example"))
+                    .withParams("{\"nprobe\":10}")
+                    .build();
+
+            R<SearchResults> searchResponse = milvusClient.search(searchParam);
+            if (searchResponse.getStatus() != 0) {
+                throw new RuntimeException("意图示例向量搜索失败: " + searchResponse.getMessage());
+            }
+
+            SearchResultsWrapper wrapper = new SearchResultsWrapper(searchResponse.getData().getResults());
+            List<IntentSearchResult> results = new ArrayList<>();
+            int rowCount = wrapper.getRowRecords(0).size();
+            for (int i = 0; i < rowCount; i++) {
+                IntentSearchResult result = new IntentSearchResult();
+                result.setIntent((String) wrapper.getFieldData("intent", 0).get(i));
+                result.setExample((String) wrapper.getFieldData("example", 0).get(i));
+                result.setScore(wrapper.getIDScore(0).get(i).getScore());
+                results.add(result);
+            }
+
+            logger.info("意图示例搜索完成, 找到 {} 个结果", results.size());
+            return results;
+        } catch (Exception e) {
+            logger.error("搜索意图示例失败", e);
+            throw new RuntimeException("搜索意图示例失败: " + e.getMessage(), e);
+        }
+    }
+
     /**
      * 搜索结果类
      */
@@ -111,5 +162,14 @@ public class VectorSearchService {
         /** 融合重排分数（由 rerank 计算，0-1） */
         private Float rerankScore;
 
+    }
+
+    @Setter
+    @Getter
+    public static class IntentSearchResult {
+        private String intent;
+        private String example;
+        /** Milvus COSINE 相似度分数，越大越相似 */
+        private float score;
     }
 }
