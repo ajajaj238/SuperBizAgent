@@ -21,6 +21,12 @@ milvus:
 
 # Spring AI Alibaba DashScope 配置
 spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.mcp.client.common.autoconfigure.McpClientAutoConfiguration
+      - org.springframework.ai.mcp.client.common.autoconfigure.McpToolCallbackAutoConfiguration
+      - org.springframework.ai.mcp.client.webflux.autoconfigure.SseWebFluxTransportAutoConfiguration
+      - org.springframework.ai.mcp.client.webflux.autoconfigure.StreamableHttpWebFluxTransportAutoConfiguration
   ai:
     dashscope:
       api-key: ${DASHSCOPE_API_KEY:}  # 从环境变量读取
@@ -39,7 +45,7 @@ spring:
     # 如果使用mock数据，请注释这部分内容
     mcp:
       client:
-        enabled: true
+        enabled: false
         name: tencent-mcp-server
         version: 1.0.0
         request-timeout: 60s
@@ -65,7 +71,7 @@ document:
 
 # RAG 配置
 rag:
-  top-k: 3  # 检索返回的最相似文档数量
+  top-k: 4  # 检索返回的最相似文档数量
   model: "qwen3-max"  # 大语言模型名称 实际没有使用（用的默认的qwen-plus）
   evaluation:
     enabled: true
