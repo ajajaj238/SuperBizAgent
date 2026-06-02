@@ -51,6 +51,9 @@ uploads/
 *.sh
 *.py
 
+### Claude
+.claude/
+
 ### docker
 /volumes
 /server.pid
