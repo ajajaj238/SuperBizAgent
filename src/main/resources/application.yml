@@ -1,4 +1,5 @@
 server:
+  shutdown: graceful  # 开启优雅停机[reference:0][reference:1]
   port: 9900
   servlet:
     encoding:
@@ -21,12 +22,34 @@ milvus:
 
 # Spring AI Alibaba DashScope 配置
 spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 30s # 设置最大等待时间，默认30秒[reference:2][reference:3]
   autoconfigure:
     exclude:
       - org.springframework.ai.mcp.client.common.autoconfigure.McpClientAutoConfiguration
       - org.springframework.ai.mcp.client.common.autoconfigure.McpToolCallbackAutoConfiguration
       - org.springframework.ai.mcp.client.webflux.autoconfigure.SseWebFluxTransportAutoConfiguration
       - org.springframework.ai.mcp.client.webflux.autoconfigure.StreamableHttpWebFluxTransportAutoConfiguration
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/super-big-agent?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
+    username: root
+    password: zhj123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      password: 123456
+      database: 1
+      timeout: 3000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 4
+  sql:
+    init:
+      mode: always
   ai:
     dashscope:
       api-key: ${DASHSCOPE_API_KEY:}  # 从环境变量读取
@@ -103,3 +126,16 @@ management:
   endpoint:
     health:
       show-details: always
+
+session:
+  storage:
+    path: ./data/sessions
+    redis-ttl: 24h
+    redis-max-messages: 50
+    compression-interval: 5
+    llm-context-window: 10
+    semantic-top-k: 3
+
+mybatis:
+  configuration:
+    map-underscore-to-camel-case: true

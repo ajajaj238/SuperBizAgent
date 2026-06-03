@@ -53,6 +53,12 @@ public class HybridIntentClassifier {
         if (text.matches("^(你好|您好|hello|hi|嗨|谢谢|感谢|再见|拜拜)[!！。\\s]*$")) {
             return result(UserIntent.CHITCHAT, 0.95, "quick_regex", "问候/致谢/告别", userInput);
         }
+        if (isAssistantIdentityQuestion(text)) {
+            return result(UserIntent.CHITCHAT, 0.94, "quick_regex", "询问助手身份/能力", userInput);
+        }
+        if (text.matches("^(我是|我叫|我的名字是|本人是).+")) {
+            return result(UserIntent.CHITCHAT, 0.92, "quick_regex", "用户自我介绍/身份声明", userInput);
+        }
         if (text.matches(".*(现在几点|当前时间|今天几号|今天日期|星期几|周几).*")) {
             return result(UserIntent.TIME_QUERY, 0.95, "quick_regex", "时间查询", userInput);
         }
@@ -61,6 +67,10 @@ public class HybridIntentClassifier {
         }
 
         return null;
+    }
+
+    private boolean isAssistantIdentityQuestion(String text) {
+        return text.matches(".*(你是谁|你叫什么|你叫啥|你的名字|你名字|介绍一下自己|介绍下自己|你能做什么|你可以做什么|你有什么能力|你会什么).*");
     }
 
     private IntentResult result(UserIntent intent, double confidence, String method, String reason, String rawInput) {

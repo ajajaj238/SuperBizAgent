@@ -18,6 +18,8 @@ import org.example.service.intent.IntentResult;
 import org.example.service.intent.SessionIntentTracker;
 import org.example.service.intent.ToolFilter;
 import org.example.service.intent.UserIntent;
+import org.example.service.session.PersistentSessionService;
+import org.example.service.session.SessionContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
@@ -30,11 +32,9 @@ import reactor.core.publisher.Flux;
 
 import java.io.IOException;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 统一 API 控制器
@@ -61,13 +61,10 @@ public class ChatController {
     @Autowired
     private SessionIntentTracker intentTracker;
 
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    @Autowired
+    private PersistentSessionService persistentSessionService;
 
-    // 存储会话信息
-    private final Map<String, SessionInfo> sessions = new ConcurrentHashMap<>();
-    
-    // 最大历史消息窗口大小（成对计算：用户消息+AI回复=1对）
-    private static final int MAX_WINDOW_SIZE = 10;
+    private final ExecutorService executor = Executors.newCachedThreadPool();
 
     /**
      * 普通对话接口（支持工具调用）
@@ -85,15 +82,16 @@ public class ChatController {
             }
 
             // 获取或创建会话
-            SessionInfo session = getOrCreateSession(request.getId());
-            tokenUsageRecorder.beginConversation(session.getSessionId(), "/api/chat", request.getQuestion());
+            SessionContext session = getOrCreateSession(request.getId());
+            tokenUsageRecorder.beginConversation(session.sessionId(), "/api/chat", request.getQuestion());
             
             // 获取历史消息
-            List<Map<String, String>> history = session.getHistory();
+            List<Map<String, String>> history = persistentSessionService.getRecentHistory(session);
+            List<String> semanticMemories = persistentSessionService.getSemanticMemories(session, request.getQuestion());
             logger.info("会话历史消息对数: {}", history.size() / 2);
 
-            IntentResult intentResult = intentClassifier.classify(request.getQuestion(), session.getSessionId(), history);
-            recordIntent(session.getSessionId(), intentResult);
+            IntentResult intentResult = intentClassifier.classify(request.getQuestion(), session.sessionId(), history);
+            recordIntent(session.sessionId(), intentResult);
 
             if (intentResult.getIntent() == UserIntent.SYSTEM_OPERATION) {
                 String answer = handleSystemOperation(session);
@@ -103,8 +101,10 @@ public class ChatController {
 
             if (intentResult.getIntent() == UserIntent.ALERT_DIAGNOSIS) {
                 String report = executeAiOpsReport();
-                session.addMessage(request.getQuestion(), report, chatService);
+                int pairCount = persistentSessionService.appendConversation(session, request.getQuestion(), report, chatService);
                 tokenUsageRecorder.completeConversationSuccess(report.length());
+                logger.info("已更新持久化会话历史 - SessionId: {}, 当前消息对数: {}",
+                        session.sessionId(), pairCount);
                 return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(report)));
             }
 
@@ -134,6 +134,7 @@ public class ChatController {
             // 每次回答前先执行 RAG 预检索，再将检索结果注入问题上下文
             String enrichedQuestion = chatService.buildAgentUserPrompt(
                     history,
+                    semanticMemories,
                     request.getQuestion(),
                     chatService.shouldEnableRag(intentResult.getIntent()));
             
@@ -141,9 +142,9 @@ public class ChatController {
             String fullAnswer = chatService.executeChat(agent, monitoredChatModel, systemPrompt, enrichedQuestion);
             
             // 更新会话历史
-            session.addMessage(request.getQuestion(), fullAnswer, chatService);
+            int pairCount = persistentSessionService.appendConversation(session, request.getQuestion(), fullAnswer, chatService);
             logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}", 
-                request.getId(), session.getMessagePairCount());
+                session.sessionId(), pairCount);
             tokenUsageRecorder.completeConversationSuccess(fullAnswer.length());
 
             //打印历史记录
@@ -169,9 +170,9 @@ public class ChatController {
                 return ResponseEntity.ok(ApiResponse.error("会话ID不能为空"));
             }
 
-            SessionInfo session = sessions.get(request.getId());
-            if (session != null) {
-                session.clearHistory();
+            Optional<SessionContext> session = persistentSessionService.findSession(request.getId());
+            if (session.isPresent()) {
+                persistentSessionService.clearSession(session.get());
                 intentTracker.clear(request.getId());
                 return ResponseEntity.ok(ApiResponse.success("会话历史已清空"));
             } else {
@@ -209,15 +210,16 @@ public class ChatController {
                 logger.info("收到 ReactAgent 对话请求 - SessionId: {}, Question: {}", request.getId(), request.getQuestion());
 
                 // 获取或创建会话
-                SessionInfo session = getOrCreateSession(request.getId());
-                tokenUsageRecorder.beginConversation(session.getSessionId(), "/api/chat_stream", request.getQuestion());
+                SessionContext session = getOrCreateSession(request.getId());
+                tokenUsageRecorder.beginConversation(session.sessionId(), "/api/chat_stream", request.getQuestion());
                 
                 // 获取历史消息
-                List<Map<String, String>> history = session.getHistory();
+                List<Map<String, String>> history = persistentSessionService.getRecentHistory(session);
+                List<String> semanticMemories = persistentSessionService.getSemanticMemories(session, request.getQuestion());
                 logger.info("ReactAgent 会话历史消息对数: {}", history.size() / 2);
 
-                IntentResult intentResult = intentClassifier.classify(request.getQuestion(), session.getSessionId(), history);
-                recordIntent(session.getSessionId(), intentResult);
+                IntentResult intentResult = intentClassifier.classify(request.getQuestion(), session.sessionId(), history);
+                recordIntent(session.sessionId(), intentResult);
 
                 if (intentResult.getIntent() == UserIntent.SYSTEM_OPERATION) {
                     String answer = handleSystemOperation(session);
@@ -235,7 +237,7 @@ public class ChatController {
                 if (intentResult.getIntent() == UserIntent.ALERT_DIAGNOSIS) {
                     streamAiOpsReport(emitter);
                     String answer = "已通过 AIOps 多 Agent 生成告警分析报告。";
-                    session.addMessage(request.getQuestion(), answer, chatService);
+                    persistentSessionService.appendConversation(session, request.getQuestion(), answer, chatService);
                     tokenUsageRecorder.completeConversationSuccess(answer.length());
                     emitter.complete();
                     return;
@@ -267,6 +269,7 @@ public class ChatController {
                 // 每次回答前先执行 RAG 预检索，再将检索结果注入问题上下文
                 String enrichedQuestion = chatService.buildAgentUserPrompt(
                         history,
+                        semanticMemories,
                         request.getQuestion(),
                         chatService.shouldEnableRag(intentResult.getIntent()));
                 
@@ -351,9 +354,9 @@ public class ChatController {
                                 request.getId(), fullAnswer.length());
                             
                             // 更新会话历史
-                            session.addMessage(request.getQuestion(), fullAnswer, chatService);
+                            int pairCount = persistentSessionService.appendConversation(session, request.getQuestion(), fullAnswer, chatService);
                             logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}", 
-                                request.getId(), session.getMessagePairCount());
+                                session.sessionId(), pairCount);
                             tokenUsageRecorder.completeConversationSuccess(fullAnswer.length());
                             
                             // 发送完成标记
@@ -489,12 +492,12 @@ public class ChatController {
         try {
             logger.info("收到获取会话信息请求 - SessionId: {}", sessionId);
 
-            SessionInfo session = sessions.get(sessionId);
-            if (session != null) {
+            Optional<SessionContext> session = persistentSessionService.findSession(sessionId);
+            if (session.isPresent()) {
                 SessionInfoResponse response = new SessionInfoResponse();
                 response.setSessionId(sessionId);
-                response.setMessagePairCount(session.getMessagePairCount());
-                response.setCreateTime(session.createTime);
+                response.setMessagePairCount(session.get().messagePairCount());
+                response.setCreateTime(session.get().createTime().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli());
                 return ResponseEntity.ok(ApiResponse.success(response));
             } else {
                 return ResponseEntity.ok(ApiResponse.error("会话不存在"));
@@ -524,9 +527,9 @@ public class ChatController {
                 intentResult.getReason());
     }
 
-    private String handleSystemOperation(SessionInfo session) {
-        session.clearHistory();
-        intentTracker.clear(session.getSessionId());
+    private String handleSystemOperation(SessionContext session) {
+        persistentSessionService.clearSession(session);
+        intentTracker.clear(session.sessionId());
         return "会话历史已清空。";
     }
 
@@ -597,114 +600,8 @@ public class ChatController {
         emitter.send(SseEmitter.event().name("message").data(SseMessage.done(), MediaType.APPLICATION_JSON));
     }
 
-    private SessionInfo getOrCreateSession(String sessionId) {
-        if (sessionId == null || sessionId.isEmpty()) {
-            sessionId = UUID.randomUUID().toString();
-        }
-        return sessions.computeIfAbsent(sessionId, id -> new SessionInfo(id));
-    }
-
-    // ==================== 内部类 ====================
-
-    /**
-     * 会话信息
-     * 管理单个会话的历史消息，支持自动清理和线程安全
-     */
-    private class SessionInfo {
-        private final String sessionId;
-        // 存储历史消息对：[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
-        private final List<Map<String, String>> messageHistory;
-        private final long createTime;
-        private final ReentrantLock lock;
-
-        public SessionInfo(String sessionId) {
-            this.sessionId = sessionId;
-            this.messageHistory = new ArrayList<>();
-            this.createTime = System.currentTimeMillis();
-            this.lock = new ReentrantLock();
-        }
-
-        /**
-         * 添加一对消息（用户问题 + AI回复）
-         * 自动管理历史消息窗口大小
-         */
-        public void addMessage(String userQuestion, String aiAnswer, ChatService chatService) {
-            lock.lock();
-            try {
-                // 添加用户消息
-                messageHistory.add(buildMessage("user", userQuestion));
-
-                // 添加AI回复
-                messageHistory.add(buildMessage("assistant", aiAnswer));
-
-                int maxMessages = MAX_WINDOW_SIZE * 2;
-                if (messageHistory.size() >= maxMessages) {
-                    List<Map<String, String>> snapshot = new ArrayList<>(messageHistory);
-                    String summary = chatService.summarizeConversationMemory(snapshot);
-
-                    messageHistory.clear();
-                    messageHistory.add(buildMessage("user", "以下是此前 10 轮对话压缩后的历史摘要，请在后续回答中延续这些上下文。"));
-                    messageHistory.add(buildMessage("assistant", summary));
-
-                    logger.info("会话 {} 的短期记忆达到上限，已压缩为摘要记忆", sessionId);
-                }
-
-                logger.debug("会话 {} 更新历史消息，当前消息对数: {}", 
-                    sessionId, messageHistory.size() / 2);
-
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        /**
-         * 获取历史消息（线程安全）
-         * 返回副本以避免并发修改
-         */
-        public List<Map<String, String>> getHistory() {
-            lock.lock();
-            try {
-                return new ArrayList<>(messageHistory);
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        /**
-         * 清空历史消息
-         */
-        public void clearHistory() {
-            lock.lock();
-            try {
-                messageHistory.clear();
-                logger.info("会话 {} 历史消息已清空", sessionId);
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        /**
-         * 获取当前消息对数
-         */
-        public int getMessagePairCount() {
-            lock.lock();
-            try {
-                return messageHistory.size() / 2;
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        public String getSessionId() {
-            return sessionId;
-        }
-
-        private Map<String, String> buildMessage(String role, String content) {
-            Map<String, String> message = new HashMap<>();
-            message.put("role", role);
-            message.put("content", content);
-            return message;
-        }
+    private SessionContext getOrCreateSession(String sessionId) {
+        return persistentSessionService.getOrCreateSession(sessionId, "default-user");
     }
 
     /**

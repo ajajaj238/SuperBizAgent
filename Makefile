@@ -8,6 +8,8 @@ DOCS_DIR = aiops-docs
 HEALTH_CHECK_API = $(SERVER_URL)/milvus/health
 DOCKER_COMPOSE_FILE = vector-database.yml
 MILVUS_CONTAINER = milvus-standalone
+APP_JAR = target/super-biz-agent-1.0-SNAPSHOT.jar
+STOP_TIMEOUT = 60
 
 # 颜色输出
 GREEN = \033[0;32m
@@ -70,8 +72,10 @@ start:
 	@if curl -s -f $(HEALTH_CHECK_API) > /dev/null 2>&1; then \
 		echo "$(GREEN)✅ 服务已经在运行中 ($(SERVER_URL))$(NC)"; \
 	else \
+		echo "$(YELLOW)📦 正在打包应用...$(NC)"; \
+		mvn -q -DskipTests package || exit 1; \
 		echo "$(YELLOW)📦 正在启动服务（后台运行）...$(NC)"; \
-		nohup mvn spring-boot:run > server.log 2>&1 & \
+		nohup java -Dspring.devtools.restart.enabled=false -jar $(APP_JAR) > server.log 2>&1 & \
 		echo $$! > server.pid; \
 		echo "$(GREEN)✅ 服务启动命令已执行$(NC)"; \
 		echo "$(YELLOW)   PID: $$(cat server.pid)$(NC)"; \
@@ -153,15 +157,26 @@ stop:
 	@if [ -f server.pid ]; then \
 		pid=$$(cat server.pid); \
 		if ps -p $$pid > /dev/null 2>&1; then \
-			kill $$pid; \
-			echo "$(GREEN)✅ 服务已停止 (PID: $$pid)$(NC)"; \
+			echo "$(YELLOW)   发送 SIGTERM，等待 Spring Boot 优雅退出 (PID: $$pid)...$(NC)"; \
+			kill -TERM $$pid; \
+			timeout=$(STOP_TIMEOUT); \
+			while ps -p $$pid > /dev/null 2>&1 && [ $$timeout -gt 0 ]; do \
+				sleep 1; \
+				timeout=$$((timeout - 1)); \
+			done; \
+			if ps -p $$pid > /dev/null 2>&1; then \
+				echo "$(RED)❌ 服务在 $(STOP_TIMEOUT) 秒内未退出，请查看 server.log 后手动处理 (PID: $$pid)$(NC)"; \
+				exit 1; \
+			else \
+				echo "$(GREEN)✅ 服务已优雅退出 (PID: $$pid)$(NC)"; \
+			fi; \
 		else \
 			echo "$(YELLOW)⚠️  进程不存在 (PID: $$pid)$(NC)"; \
 		fi; \
 		rm -f server.pid; \
 	else \
 		echo "$(YELLOW)⚠️  未找到 server.pid 文件$(NC)"; \
-		pkill -f "spring-boot:run" && echo "$(GREEN)✅ 已停止所有 spring-boot 进程$(NC)" || echo "$(YELLOW)⚠️  没有运行中的 spring-boot 进程$(NC)"; \
+		pkill -TERM -f "java .*$(APP_JAR)" && echo "$(GREEN)✅ 已向 java -jar 服务发送 SIGTERM$(NC)" || echo "$(YELLOW)⚠️  没有运行中的 java -jar 服务$(NC)"; \
 	fi
 
 # 重启 Spring Boot 服务
