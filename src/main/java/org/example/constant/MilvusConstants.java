@@ -16,11 +16,16 @@ public class MilvusConstants {
      * 意图示例集合名称（独立 collection，避免与 RAG 文档混存）
      */
     public static final String INTENT_EXAMPLES_COLLECTION_NAME = "intent_examples";
+
+    /**
+     * 用户长期语义记忆集合
+     */
+    public static final String USER_MEMORIES_COLLECTION_NAME = "user_memories";
     
     /**
      * 向量维度（豆包 embedding 模型的维度）
      */
-    public static final int VECTOR_DIM = 1024;  // 豆包模型返回1024维向量
+    public static final int VECTOR_DIM = 1024;  // 返回1024维向量
     
     /**
      * ID字段最大长度
@@ -41,6 +46,16 @@ public class MilvusConstants {
      * 意图示例文本最大长度
      */
     public static final int INTENT_EXAMPLE_MAX_LENGTH = 512;
+
+    /**
+     * 会话ID字段最大长度
+     */
+    public static final int SESSION_ID_MAX_LENGTH = 64;
+
+    /**
+     * 用户语义记忆文本最大长度
+     */
+    public static final int USER_MEMORY_MAX_LENGTH = 2048;
     
     /**
      * 默认分片数

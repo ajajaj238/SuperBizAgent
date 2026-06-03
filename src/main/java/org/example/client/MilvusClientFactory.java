@@ -61,6 +61,7 @@ public class MilvusClientFactory {
             }
 
             initializeIntentExamplesCollection(client);
+            initializeUserMemoriesCollection(client);
 
             return client;
 
@@ -304,5 +305,116 @@ public class MilvusClientFactory {
         return normalized.contains("already exist")
                 || normalized.contains("already_exists")
                 || normalized.contains("duplicated");
+    }
+
+    private void initializeUserMemoriesCollection(MilvusServiceClient client) {
+        int maxAttempts = 3;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                if (!collectionExists(client, MilvusConstants.USER_MEMORIES_COLLECTION_NAME)) {
+                    logger.info("collection '{}' 不存在，正在创建... attempt={}/{}",
+                            MilvusConstants.USER_MEMORIES_COLLECTION_NAME, attempt, maxAttempts);
+                    createUserMemoriesCollection(client);
+                    logger.info("成功创建 collection '{}'", MilvusConstants.USER_MEMORIES_COLLECTION_NAME);
+                } else {
+                    logger.info("collection '{}' 已存在", MilvusConstants.USER_MEMORIES_COLLECTION_NAME);
+                }
+
+                createUserMemoriesIndex(client);
+                logger.info("成功创建或确认 user_memories 索引");
+                return;
+            } catch (Exception e) {
+                if (attempt == maxAttempts) {
+                    logger.warn("user_memories 初始化失败，应用将继续启动，长期语义记忆会自动降级: {}", e.getMessage());
+                    return;
+                }
+                logger.warn("user_memories 初始化失败，准备重试: attempt={}/{}, error={}",
+                        attempt, maxAttempts, e.getMessage());
+                sleepBeforeRetry(attempt);
+            }
+        }
+    }
+
+    private void createUserMemoriesCollection(MilvusServiceClient client) {
+        FieldType idField = FieldType.newBuilder()
+                .withName("id")
+                .withDataType(DataType.VarChar)
+                .withMaxLength(MilvusConstants.ID_MAX_LENGTH)
+                .withPrimaryKey(true)
+                .build();
+
+        FieldType userIdField = FieldType.newBuilder()
+                .withName("user_id")
+                .withDataType(DataType.Int64)
+                .build();
+
+        FieldType sessionIdField = FieldType.newBuilder()
+                .withName("session_id")
+                .withDataType(DataType.VarChar)
+                .withMaxLength(MilvusConstants.SESSION_ID_MAX_LENGTH)
+                .build();
+
+        FieldType insightField = FieldType.newBuilder()
+                .withName("insight")
+                .withDataType(DataType.VarChar)
+                .withMaxLength(MilvusConstants.USER_MEMORY_MAX_LENGTH)
+                .build();
+
+        FieldType createdAtField = FieldType.newBuilder()
+                .withName("created_at")
+                .withDataType(DataType.Int64)
+                .build();
+
+        FieldType embeddingField = FieldType.newBuilder()
+                .withName("embedding")
+                .withDataType(DataType.FloatVector)
+                .withDimension(MilvusConstants.VECTOR_DIM)
+                .build();
+
+        CollectionSchemaParam schema = CollectionSchemaParam.newBuilder()
+                .withEnableDynamicField(false)
+                .addFieldType(idField)
+                .addFieldType(userIdField)
+                .addFieldType(sessionIdField)
+                .addFieldType(insightField)
+                .addFieldType(createdAtField)
+                .addFieldType(embeddingField)
+                .build();
+
+        CreateCollectionParam createParam = CreateCollectionParam.newBuilder()
+                .withCollectionName(MilvusConstants.USER_MEMORIES_COLLECTION_NAME)
+                .withDescription("User semantic memory collection")
+                .withSchema(schema)
+                .withShardsNum(MilvusConstants.DEFAULT_SHARD_NUMBER)
+                .build();
+
+        R<RpcStatus> response = client.createCollection(createParam);
+        if (response.getStatus() != 0) {
+            if (isAlreadyExistsError(response.getMessage())) {
+                logger.info("user_memories collection 已存在，跳过创建");
+                return;
+            }
+            throw new RuntimeException("创建 user_memories collection 失败: " + response.getMessage());
+        }
+    }
+
+    private void createUserMemoriesIndex(MilvusServiceClient client) {
+        CreateIndexParam indexParam = CreateIndexParam.newBuilder()
+                .withCollectionName(MilvusConstants.USER_MEMORIES_COLLECTION_NAME)
+                .withFieldName("embedding")
+                .withIndexType(IndexType.IVF_FLAT)
+                .withMetricType(MetricType.COSINE)
+                .withExtraParam("{\"nlist\":128}")
+                .withSyncMode(Boolean.FALSE)
+                .build();
+
+        R<RpcStatus> response = client.createIndex(indexParam);
+        if (response.getStatus() != 0) {
+            if (isAlreadyExistsError(response.getMessage())) {
+                logger.info("user_memories.embedding 索引已存在，跳过创建");
+                return;
+            }
+            throw new RuntimeException("创建 user_memories.embedding 索引失败: " + response.getMessage());
+        }
     }
 }
