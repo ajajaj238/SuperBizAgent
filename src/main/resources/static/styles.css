@@ -200,6 +200,78 @@ body {
     height: 16px;
 }
 
+/* 底部用户信息与退出登录 */
+.sidebar-footer {
+    padding: 12px 8px;
+    border-top: 1px solid #dadce0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.user-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+}
+
+.user-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: #e8eaed;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #5f6368;
+    flex-shrink: 0;
+}
+
+.user-avatar svg {
+    width: 18px;
+    height: 18px;
+}
+
+.user-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: #202124;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.logout-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    background: none;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    color: #5f6368;
+    font-size: 13px;
+    transition: all 0.2s;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.logout-btn:hover {
+    background: rgba(234, 67, 53, 0.08);
+    color: #ea4335;
+}
+
+.logout-btn svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+}
+
 /* 主内容区域 */
 .main-content {
     flex: 1;

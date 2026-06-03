@@ -188,6 +188,49 @@ public class PersistentSessionService {
         }
     }
 
+    /**
+     * 压缩指定用户的所有活跃会话摘要并存入 Milvus
+     */
+    public void compressUserSessions(Long userId) {
+        try {
+            List<SessionIndex> userSessions = sessionIndexMapper.findByUserId(userId);
+            if (userSessions.isEmpty()) {
+                logger.info("用户 {} 没有需要压缩的会话", userId);
+                return;
+            }
+
+            fileSessionStore.flushNow();
+            logger.info("用户 {} 开始压缩 {} 个会话", userId, userSessions.size());
+
+            for (SessionIndex sessionIndex : userSessions) {
+                try {
+                    if (sessionIndex.getMessageCount() == null || sessionIndex.getMessageCount() == 0) {
+                        continue;
+                    }
+
+                    List<ChatMessage> messages = fileSessionStore.readMessages(sessionIndex.getUserId(), sessionIndex.getSessionId());
+                    if (messages.isEmpty()) {
+                        messages = redisSessionStore.getAllWarmMessages(sessionIndex.getUserId(), sessionIndex.getSessionId());
+                    }
+                    if (messages.isEmpty()) {
+                        continue;
+                    }
+
+                    String summary = chatService.summarizeConversationMemory(toHistory(messages));
+                    sessionIndex.setSummary(summary);
+                    sessionIndexMapper.update(sessionIndex);
+                    userMemoryVectorStore.storeSessionSummary(sessionIndex.getUserId(), sessionIndex.getSessionId(), summary);
+                    logger.info("用户 {} 会话 {} 摘要已保存到 Milvus", userId, sessionIndex.getSessionId());
+                } catch (Exception e) {
+                    logger.warn("用户 {} 会话 {} 压缩失败: {}", userId, sessionIndex.getSessionId(), e.getMessage());
+                }
+            }
+            logger.info("用户 {} 所有会话压缩完成", userId);
+        } catch (Exception e) {
+            logger.warn("用户 {} 压缩失败: {}", userId, e.getMessage());
+        }
+    }
+
     private UserAccount getOrCreateUser(String requestedUsername) {
         String username = (requestedUsername == null || requestedUsername.isBlank())
                 ? DEFAULT_USERNAME

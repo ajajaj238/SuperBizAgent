@@ -1,0 +1,11 @@
+[ {
+  "msgId" : "m_d24791ef260643da8bd3fd8dba81312c",
+  "role" : "user",
+  "content" : "我是阿杰",
+  "timestamp" : [ 2026, 6, 3, 23, 5, 26, 905812800 ]
+}, {
+  "msgId" : "m_9f437a8aec3d418eb46139a619df7c8c",
+  "role" : "assistant",
+  "content" : "你好，阿杰！很高兴认识你～ \uD83D\uDE0A",
+  "timestamp" : [ 2026, 6, 3, 23, 5, 26, 917389000 ]
+} ]

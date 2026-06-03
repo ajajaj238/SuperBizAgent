@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - 智能OnCall助手</title>
+    <link rel="stylesheet" href="login.css">
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-card">
+            <div class="login-header">
+                <div class="login-logo">
+                    <svg width="52" height="52" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"
+                              fill="#4A9EFF" stroke="#4A9EFF" stroke-width="0.5"/>
+                    </svg>
+                </div>
+                <h1 class="login-title">智能 OnCall 助手</h1>
+                <p class="login-subtitle">AI 驱动的智能运维平台</p>
+            </div>
+
+            <form class="login-form" id="loginForm">
+                <div class="form-group">
+                    <label for="usernameInput">用户名</label>
+                    <input type="text" id="usernameInput" placeholder="请输入用户名"
+                           autocomplete="username" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="passwordInput">密码</label>
+                    <input type="password" id="passwordInput" placeholder="请输入密码"
+                           autocomplete="current-password" required>
+                </div>
+
+                <div class="login-options">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="rememberMe" checked>
+                        <span class="checkbox-text">记住用户名</span>
+                    </label>
+                </div>
+
+                <button type="submit" class="login-btn" id="loginBtn">
+                    <span class="btn-text">登 录</span>
+                    <span class="btn-loading" style="display:none">
+                        <svg class="spin" width="18" height="18" viewBox="0 0 24 24" fill="none">
+                            <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" opacity="0.3"/>
+                            <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+                        </svg>
+                        登录中...
+                    </span>
+                </button>
+
+                <div class="login-error" id="loginError" role="alert" style="display:none"></div>
+            </form>
+
+            <div class="login-footer">
+                <p>首次使用请联系管理员开通账号</p>
+            </div>
+        </div>
+    </div>
+    <script src="login.js"></script>
+</body>
+</html>
