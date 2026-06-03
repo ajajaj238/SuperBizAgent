@@ -18,7 +18,7 @@
             <div class="sidebar-header">
                 <h2 class="sidebar-title">智能OnCall助手</h2>
             </div>
-            
+
             <div class="sidebar-content">
                 <button class="new-chat-btn" id="newChatBtn">
                     <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -26,7 +26,7 @@
                     </svg>
                     <span>新建对话</span>
                 </button>
-                
+
                 <div class="chat-history-section">
                     <div class="history-header">
                         <span>近期对话</span>
@@ -35,7 +35,25 @@
                         <!-- 历史对话列表将在这里动态生成 -->
                     </div>
                 </div>
-                
+            </div>
+
+            <!-- 底部用户信息与退出 -->
+            <div class="sidebar-footer">
+                <div class="user-info" id="userInfo">
+                    <div class="user-avatar" id="userAvatar">
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <circle cx="12" cy="8" r="4" stroke="currentColor" stroke-width="2"/>
+                            <path d="M4 20c0-4 3.58-6 8-6s8 2 8 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                    </div>
+                    <div class="user-name" id="userName">用户</div>
+                </div>
+                <button class="logout-btn" id="logoutBtn" title="退出登录">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span>退出登录</span>
+                </button>
             </div>
         </aside>
 

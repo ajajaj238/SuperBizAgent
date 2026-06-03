@@ -1,20 +1,87 @@
 // SuperBizAgent 前端应用
 class SuperBizAgentApp {
     constructor() {
-        this.apiBaseUrl = 'http://localhost:9900/api';
+        // 认证检查：没有 token 则跳转登录页
+        const token = this.getToken();
+        if (!token) {
+            window.location.replace('/login.html');
+            return;
+        }
+
+        this.token = token;
+        this.currentUser = this.getCurrentUser();
+        this.apiBaseUrl = '/api';
         this.currentMode = 'quick'; // 'quick' 或 'stream'
         this.sessionId = this.generateSessionId();
         this.isStreaming = false;
         this.currentChatHistory = []; // 当前对话的消息历史
         this.chatHistories = this.loadChatHistories(); // 所有历史对话
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
-        
+
         this.initializeElements();
         this.bindEvents();
         this.updateUI();
         this.initMarkdown();
         this.checkAndSetCentered();
         this.renderChatHistory();
+
+        // 自动恢复上次的对话
+        this.restoreLastSession();
+    }
+
+    // ==================== 认证相关 ====================
+
+    getToken() {
+        return localStorage.getItem('token');
+    }
+
+    getCurrentUser() {
+        try {
+            return JSON.parse(localStorage.getItem('user') || '{}');
+        } catch (e) {
+            return {};
+        }
+    }
+
+    /**
+     * 统一的 API 请求封装（自动带认证头）
+     */
+    async apiFetch(url, options = {}) {
+        const headers = {
+            'Authorization': 'Bearer ' + this.token,
+            ...options.headers
+        };
+
+        const resp = await fetch(url, { ...options, headers });
+
+        if (resp.status === 401) {
+            // 只清除认证信息，保留历史对话
+            localStorage.removeItem('token');
+            localStorage.removeItem('user');
+            localStorage.removeItem('savedUsername');
+            window.location.replace('/login.html');
+            return null;
+        }
+
+        return resp;
+    }
+
+    /**
+     * 退出登录
+     */
+    async logout() {
+        // 退出前先保存对话摘要到 Milvus
+        try {
+            await this.apiFetch(`${this.apiBaseUrl}/session/compress`, { method: 'POST' });
+        } catch (e) {
+            console.warn('保存摘要失败（不影响退出）:', e);
+        }
+
+        // 只清除认证信息，保留历史对话
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        localStorage.removeItem('savedUsername');
+        window.location.replace('/login.html');
     }
 
     // 初始化Markdown配置
@@ -116,7 +183,14 @@ class SuperBizAgentApp {
         this.chatContainer = document.querySelector('.chat-container');
         this.welcomeGreeting = document.getElementById('welcomeGreeting');
         this.chatHistoryList = document.getElementById('chatHistoryList');
-        
+        this.logoutBtn = document.getElementById('logoutBtn');
+        this.userNameEl = document.getElementById('userName');
+
+        // 显示当前用户名
+        if (this.userNameEl && this.currentUser && this.currentUser.displayName) {
+            this.userNameEl.textContent = this.currentUser.displayName;
+        }
+
         // 初始化时检查是否需要居中
         this.checkAndSetCentered();
     }
@@ -202,6 +276,11 @@ class SuperBizAgentApp {
         
         if (this.fileInput) {
             this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
+        }
+
+        // 退出登录
+        if (this.logoutBtn) {
+            this.logoutBtn.addEventListener('click', () => this.logout());
         }
     }
 
@@ -353,21 +432,27 @@ class SuperBizAgentApp {
         this.saveChatHistories();
     }
     
+    // 历史对话的 localStorage key（按用户隔离）
+    getChatHistoriesKey() {
+        const userId = this.currentUser?.id || 'anonymous';
+        return 'chatHistories_' + userId;
+    }
+
     // 加载历史对话列表
     loadChatHistories() {
         try {
-            const stored = localStorage.getItem('chatHistories');
+            const stored = localStorage.getItem(this.getChatHistoriesKey());
             return stored ? JSON.parse(stored) : [];
         } catch (e) {
             console.error('加载历史对话失败:', e);
             return [];
         }
     }
-    
+
     // 保存历史对话列表到localStorage
     saveChatHistories() {
         try {
-            localStorage.setItem('chatHistories', JSON.stringify(this.chatHistories));
+            localStorage.setItem(this.getChatHistoriesKey(), JSON.stringify(this.chatHistories));
         } catch (e) {
             console.error('保存历史对话失败:', e);
         }
@@ -418,7 +503,27 @@ class SuperBizAgentApp {
             this.chatHistoryList.appendChild(historyItem);
         });
     }
-    
+
+    // 恢复上次的对话（刷新页面后自动显示之前的对话）
+    restoreLastSession() {
+        if (this.chatHistories.length > 0) {
+            const lastHistory = this.chatHistories[0];
+            this.sessionId = lastHistory.id;
+            this.currentChatHistory = [...lastHistory.messages];
+            this.isCurrentChatFromHistory = true;
+
+            if (this.chatMessages) {
+                this.chatMessages.innerHTML = '';
+                lastHistory.messages.forEach(msg => {
+                    this.addMessage(msg.type, msg.content, false, false);
+                });
+            }
+
+            this.checkAndSetCentered();
+            this.renderChatHistory();
+        }
+    }
+
     // 加载历史对话
     loadChatHistory(historyId) {
         const history = this.chatHistories.find(h => h.id === historyId);
@@ -591,10 +696,15 @@ class SuperBizAgentApp {
             this.isStreaming = false;
             this.updateUI();
             
-            // 如果当前对话是从历史记录加载的，更新历史记录
-            if (this.isCurrentChatFromHistory && this.currentChatHistory.length > 0) {
-                this.updateCurrentChatHistory();
-                this.renderChatHistory(); // 更新历史对话列表显示
+            // 保存当前对话到历史记录（新对话和历史对话都保存）
+            if (this.currentChatHistory.length > 0) {
+                if (this.isCurrentChatFromHistory) {
+                    this.updateCurrentChatHistory();
+                } else {
+                    this.saveCurrentChat();
+                    this.isCurrentChatFromHistory = true; // 标记为已保存，后续消息走更新路径
+                }
+                this.renderChatHistory();
             }
         }
     }
@@ -605,7 +715,7 @@ class SuperBizAgentApp {
         const loadingMessage = this.addLoadingMessage('正在思考...');
         
         try {
-            const response = await fetch(`${this.apiBaseUrl}/chat`, {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/chat`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -615,6 +725,7 @@ class SuperBizAgentApp {
                     Question: message
                 })
             });
+            if (!response) return;
 
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
@@ -661,7 +772,7 @@ class SuperBizAgentApp {
     // 发送流式消息
     async sendStreamMessage(message) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/chat_stream`, {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/chat_stream`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -671,6 +782,7 @@ class SuperBizAgentApp {
                     Question: message
                 })
             });
+            if (!response) return;
 
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
@@ -1057,10 +1169,11 @@ class SuperBizAgentApp {
             formData.append('file', file);
 
             // 发送上传请求
-            const response = await fetch(`${this.apiBaseUrl}/upload`, {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/upload`, {
                 method: 'POST',
                 body: formData
             });
+            if (!response) return;
 
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);
@@ -1102,12 +1215,13 @@ class SuperBizAgentApp {
     // 发送智能运维请求（SSE 流式模式）
     async sendAIOpsRequest(loadingMessageElement) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/ai_ops`, {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/ai_ops`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 }
             });
+            if (!response) return;
 
             if (!response.ok) {
                 throw new Error(`HTTP错误: ${response.status}`);

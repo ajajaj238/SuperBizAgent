@@ -13,6 +13,7 @@ import lombok.Setter;
 import org.example.monitor.TokenUsageRecorder;
 import org.example.service.AiOpsService;
 import org.example.service.ChatService;
+import org.example.config.UserContext;
 import org.example.service.intent.HybridIntentClassifier;
 import org.example.service.intent.IntentResult;
 import org.example.service.intent.SessionIntentTracker;
@@ -32,8 +33,7 @@ import reactor.core.publisher.Flux;
 
 import java.io.IOException;
 import java.util.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -64,7 +64,10 @@ public class ChatController {
     @Autowired
     private PersistentSessionService persistentSessionService;
 
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final ExecutorService executor = new ThreadPoolExecutor(
+            4, 20, 60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(256),
+            new ThreadPoolExecutor.CallerRunsPolicy());
 
     /**
      * 普通对话接口（支持工具调用）
@@ -485,6 +488,20 @@ public class ChatController {
 
 
     /**
+     * 退出前压缩当前用户的所有会话摘要到 Milvus
+     */
+    @PostMapping("/session/compress")
+    public ResponseEntity<ApiResponse<String>> compressSessions() {
+        Long userId = UserContext.getUserId();
+        if (userId == null) {
+            return ResponseEntity.ok(ApiResponse.success("ok"));
+        }
+        // 异步执行摘要压缩，不阻塞前端退出
+        executor.execute(() -> persistentSessionService.compressUserSessions(userId));
+        return ResponseEntity.ok(ApiResponse.success("ok"));
+    }
+
+    /**
      * 获取会话信息
      */
     @GetMapping("/chat/session/{sessionId}")
@@ -601,7 +618,11 @@ public class ChatController {
     }
 
     private SessionContext getOrCreateSession(String sessionId) {
-        return persistentSessionService.getOrCreateSession(sessionId, "default-user");
+        String username = UserContext.getUsername();
+        if (username == null) {
+            username = "default-user";
+        }
+        return persistentSessionService.getOrCreateSession(sessionId, username);
     }
 
     /**

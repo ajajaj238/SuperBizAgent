@@ -139,3 +139,8 @@ session:
 mybatis:
   configuration:
     map-underscore-to-camel-case: true
+
+# JWT 配置
+jwt:
+  secret: "SuperBizAgent-JWT-Secret-Key-2026-Must-Be-At-Least-256-Bits-Long!!"
+  expiration: 86400
