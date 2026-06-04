@@ -14,6 +14,7 @@ import org.example.monitor.TokenUsageRecorder;
 import org.example.service.AiOpsService;
 import org.example.service.ChatService;
 import org.example.config.UserContext;
+import org.example.entity.SessionIndex;
 import org.example.service.intent.HybridIntentClassifier;
 import org.example.service.intent.IntentResult;
 import org.example.service.intent.SessionIntentTracker;
@@ -21,6 +22,8 @@ import org.example.service.intent.ToolFilter;
 import org.example.service.intent.UserIntent;
 import org.example.service.session.PersistentSessionService;
 import org.example.service.session.SessionContext;
+import org.example.service.session.PersonaService;
+import org.example.service.session.ChatMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
@@ -63,6 +66,9 @@ public class ChatController {
 
     @Autowired
     private PersistentSessionService persistentSessionService;
+
+    @Autowired
+    private PersonaService personaService;
 
     private final ExecutorService executor = new ThreadPoolExecutor(
             4, 20, 60L, TimeUnit.SECONDS,
@@ -134,12 +140,20 @@ public class ChatController {
             ToolFilter toolFilter = chatService.toolFilterForIntent(intentResult.getIntent());
             ReactAgent agent = chatService.createReactAgent(monitoredChatModel, systemPrompt, toolFilter);
 
+            // 注入用户画像
+            String personaPrompt = personaService.buildPersonaPrompt(session.userId());
+
             // 每次回答前先执行 RAG 预检索，再将检索结果注入问题上下文
             String enrichedQuestion = chatService.buildAgentUserPrompt(
                     history,
                     semanticMemories,
                     request.getQuestion(),
                     chatService.shouldEnableRag(intentResult.getIntent()));
+
+            // 将用户画像追加到问题前
+            if (!personaPrompt.isBlank()) {
+                enrichedQuestion = personaPrompt + "\n" + enrichedQuestion;
+            }
             
             // 执行对话
             String fullAnswer = chatService.executeChat(agent, monitoredChatModel, systemPrompt, enrichedQuestion);
@@ -269,19 +283,27 @@ public class ChatController {
                 ToolFilter toolFilter = chatService.toolFilterForIntent(intentResult.getIntent());
                 ReactAgent agent = chatService.createReactAgent(monitoredChatModel, systemPrompt, toolFilter);
 
+                // 注入用户画像
+                String personaPrompt = personaService.buildPersonaPrompt(session.userId());
+
                 // 每次回答前先执行 RAG 预检索，再将检索结果注入问题上下文
                 String enrichedQuestion = chatService.buildAgentUserPrompt(
                         history,
                         semanticMemories,
                         request.getQuestion(),
                         chatService.shouldEnableRag(intentResult.getIntent()));
-                
+
+                // 将用户画像追加到问题前
+                String finalQuestion = !personaPrompt.isBlank()
+                        ? personaPrompt + "\n" + enrichedQuestion
+                        : enrichedQuestion;
+
                 // 用于累积完整答案
                 StringBuilder fullAnswerBuilder = new StringBuilder();
                 AtomicBoolean contentStarted = new AtomicBoolean(false);
                 
                 // 使用 agent.stream() 进行流式对话
-                Flux<NodeOutput> stream = agent.stream(enrichedQuestion);
+                Flux<NodeOutput> stream = agent.stream(finalQuestion);
                 
                 stream.subscribe(
                     output -> {
@@ -327,7 +349,7 @@ public class ChatController {
                         try {
                             if (!contentStarted.get() && chatService.isToolExecutionFailure(error)) {
                                 logger.warn("流式工具调用失败，降级为无工具直接回答: {}", chatService.rootCauseMessage(error));
-                                String fallbackAnswer = chatService.answerWithoutTools(monitoredChatModel, systemPrompt, enrichedQuestion);
+                                String fallbackAnswer = chatService.answerWithoutTools(monitoredChatModel, systemPrompt, finalQuestion);
                                 fullAnswerBuilder.append(fallbackAnswer);
                                 emitter.send(SseEmitter.event()
                                         .name("message")
@@ -502,6 +524,23 @@ public class ChatController {
     }
 
     /**
+     * 分页加载会话消息
+     */
+    @GetMapping("/chat/session/{sessionId}/messages")
+    public ResponseEntity<ApiResponse<List<ChatMessage>>> getSessionMessages(
+            @PathVariable String sessionId,
+            @RequestParam(defaultValue = "0") int afterIndex,
+            @RequestParam(defaultValue = "20") int limit) {
+        try {
+            List<ChatMessage> messages = persistentSessionService.loadMessagesPage(sessionId, afterIndex, limit);
+            return ResponseEntity.ok(ApiResponse.success(messages));
+        } catch (Exception e) {
+            logger.error("加载会话消息失败: sessionId={}", sessionId, e);
+            return ResponseEntity.ok(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
      * 获取会话信息
      */
     @GetMapping("/chat/session/{sessionId}")
@@ -524,6 +563,45 @@ public class ChatController {
             logger.error("获取会话信息失败", e);
             return ResponseEntity.ok(ApiResponse.error(e.getMessage()));
         }
+    }
+
+    /**
+     * 获取当前用户的会话列表（按创建时间倒序）
+     */
+    @GetMapping("/chat/sessions")
+    public ResponseEntity<ApiResponse<List<SessionInfoResponse>>> getUserSessions() {
+        Long userId = UserContext.getUserId();
+        if (userId == null) {
+            return ResponseEntity.ok(ApiResponse.success(List.of()));
+        }
+        List<SessionIndex> sessions = persistentSessionService.listUserSessions(userId);
+        List<SessionInfoResponse> result = sessions.stream().map(s -> {
+            SessionInfoResponse r = new SessionInfoResponse();
+            r.setSessionId(s.getSessionId());
+            r.setTitle(s.getTitle() != null && !s.getTitle().isBlank() ? s.getTitle() : "新对话");
+            r.setMessagePairCount(s.getMessageCount() != null ? s.getMessageCount() : 0);
+            r.setCreateTime(s.getCreatedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli());
+            return r;
+        }).toList();
+        return ResponseEntity.ok(ApiResponse.success(result));
+    }
+
+    /**
+     * 删除指定会话
+     */
+    @DeleteMapping("/chat/session/{sessionId}")
+    public ResponseEntity<ApiResponse<String>> deleteSession(@PathVariable String sessionId) {
+        Long userId = UserContext.getUserId();
+        if (userId == null) {
+            return ResponseEntity.ok(ApiResponse.error("未登录"));
+        }
+        Optional<SessionContext> session = persistentSessionService.findSession(sessionId);
+        if (session.isPresent()) {
+            persistentSessionService.clearSession(session.get());
+            logger.info("会话已删除: sessionId={}, userId={}", sessionId, userId);
+            return ResponseEntity.ok(ApiResponse.success("ok"));
+        }
+        return ResponseEntity.ok(ApiResponse.error("会话不存在"));
     }
 
     // ==================== 辅助方法 ====================
@@ -661,6 +739,7 @@ public class ChatController {
     @Getter
     public static class SessionInfoResponse {
         private String sessionId;
+        private String title;
         private int messagePairCount;
         private long createTime;
     }

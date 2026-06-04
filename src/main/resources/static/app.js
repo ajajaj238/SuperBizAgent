@@ -15,7 +15,7 @@ class SuperBizAgentApp {
         this.sessionId = this.generateSessionId();
         this.isStreaming = false;
         this.currentChatHistory = []; // 当前对话的消息历史
-        this.chatHistories = this.loadChatHistories(); // 所有历史对话
+        this.chatHistories = []; // 从后端加载
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
 
         this.initializeElements();
@@ -25,8 +25,8 @@ class SuperBizAgentApp {
         this.checkAndSetCentered();
         this.renderChatHistory();
 
-        // 自动恢复上次的对话
-        this.restoreLastSession();
+        // 异步加载会话列表和恢复上次对话
+        this.initAsync();
     }
 
     // ==================== 认证相关 ====================
@@ -82,6 +82,82 @@ class SuperBizAgentApp {
         localStorage.removeItem('user');
         localStorage.removeItem('savedUsername');
         window.location.replace('/login.html');
+    }
+
+    /**
+     * 异步初始化：从后端加载会话列表并恢复上次对话
+     */
+    async initAsync() {
+        await this.fetchSessions();
+        if (this.chatHistories.length > 0) {
+            await this.restoreLastSession();
+        }
+    }
+
+    /**
+     * 从后端加载会话列表
+     */
+    async fetchSessions() {
+        try {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/chat/sessions`);
+            if (!response) return;
+            const data = await response.json();
+            if (data.code === 200 && Array.isArray(data.data)) {
+                this.chatHistories = data.data.map(s => ({
+                    id: s.sessionId,
+                    title: s.title || '新对话',
+                    messagePairCount: s.messagePairCount,
+                    createdAt: new Date(s.createTime).toISOString(),
+                    updatedAt: new Date(s.createTime).toISOString()
+                }));
+            }
+        } catch (e) {
+            console.error('加载会话列表失败:', e);
+        }
+        this.renderChatHistory();
+    }
+
+    /**
+     * 从后端删除会话
+     */
+    async deleteSessionOnServer(sessionId) {
+        try {
+            await this.apiFetch(`${this.apiBaseUrl}/chat/session/${sessionId}`, {
+                method: 'DELETE'
+            });
+        } catch (e) {
+            console.error('删除会话失败:', e);
+        }
+    }
+
+    /**
+     * 从后端加载会话消息并渲染
+     */
+    async loadMessagesFromServer(sessionId) {
+        try {
+            const response = await this.apiFetch(
+                `${this.apiBaseUrl}/chat/session/${sessionId}/messages?afterIndex=0&limit=100`
+            );
+            if (!response) return;
+            const data = await response.json();
+            if (data.code === 200 && Array.isArray(data.data)) {
+                this.currentChatHistory = data.data.map(msg => ({
+                    type: msg.role === 'user' ? 'user' : 'assistant',
+                    content: msg.content,
+                    timestamp: msg.createdAt || msg.timestamp
+                }));
+                // 渲染消息
+                if (this.chatMessages) {
+                    this.chatMessages.innerHTML = '';
+                    this.currentChatHistory.forEach(msg => {
+                        this.addMessage(msg.type, msg.content, false, false);
+                    });
+                }
+                this.checkAndSetCentered();
+            }
+        } catch (e) {
+            console.error('加载会话消息失败:', e);
+        }
     }
 
     // 初始化Markdown配置
@@ -377,28 +453,27 @@ class SuperBizAgentApp {
         
         // 获取对话标题（使用第一条用户消息的前30个字符）
         const firstUserMessage = this.currentChatHistory.find(msg => msg.type === 'user');
-        const title = firstUserMessage ? 
-            (firstUserMessage.content.substring(0, 30) + (firstUserMessage.content.length > 30 ? '...' : '')) : 
+        const title = firstUserMessage ?
+            (firstUserMessage.content.substring(0, 30) + (firstUserMessage.content.length > 30 ? '...' : '')) :
             '新对话';
-        
+
         const chatHistory = {
             id: this.sessionId,
             title: title,
-            messages: [...this.currentChatHistory],
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
-        
+
         // 添加到历史记录列表的开头
         this.chatHistories.unshift(chatHistory);
-        
+
         // 限制历史记录数量（最多保存50条）
         if (this.chatHistories.length > 50) {
             this.chatHistories = this.chatHistories.slice(0, 50);
         }
-        
-        // 保存到localStorage
-        this.saveChatHistories();
+
+        // 刷新会话列表（从后端重新加载）
+        this.fetchSessions();
     }
     
     // 更新当前对话的历史记录
@@ -416,7 +491,6 @@ class SuperBizAgentApp {
         
         // 更新现有的历史记录
         const history = this.chatHistories[existingIndex];
-        history.messages = [...this.currentChatHistory];
         history.updatedAt = new Date().toISOString();
         
         // 如果标题需要更新（第一条消息改变了）
@@ -428,35 +502,10 @@ class SuperBizAgentApp {
             }
         }
         
-        // 保存到localStorage
-        this.saveChatHistories();
     }
     
-    // 历史对话的 localStorage key（按用户隔离）
-    getChatHistoriesKey() {
-        const userId = this.currentUser?.id || 'anonymous';
-        return 'chatHistories_' + userId;
-    }
 
-    // 加载历史对话列表
-    loadChatHistories() {
-        try {
-            const stored = localStorage.getItem(this.getChatHistoriesKey());
-            return stored ? JSON.parse(stored) : [];
-        } catch (e) {
-            console.error('加载历史对话失败:', e);
-            return [];
-        }
-    }
 
-    // 保存历史对话列表到localStorage
-    saveChatHistories() {
-        try {
-            localStorage.setItem(this.getChatHistoriesKey(), JSON.stringify(this.chatHistories));
-        } catch (e) {
-            console.error('保存历史对话失败:', e);
-        }
-    }
     
     // 渲染历史对话列表
     renderChatHistory() {
@@ -505,27 +554,19 @@ class SuperBizAgentApp {
     }
 
     // 恢复上次的对话（刷新页面后自动显示之前的对话）
-    restoreLastSession() {
+    async restoreLastSession() {
         if (this.chatHistories.length > 0) {
             const lastHistory = this.chatHistories[0];
             this.sessionId = lastHistory.id;
-            this.currentChatHistory = [...lastHistory.messages];
             this.isCurrentChatFromHistory = true;
-
-            if (this.chatMessages) {
-                this.chatMessages.innerHTML = '';
-                lastHistory.messages.forEach(msg => {
-                    this.addMessage(msg.type, msg.content, false, false);
-                });
-            }
-
-            this.checkAndSetCentered();
+            // 从后端加载消息
+            await this.loadMessagesFromServer(lastHistory.id);
             this.renderChatHistory();
         }
     }
 
     // 加载历史对话
-    loadChatHistory(historyId) {
+    async loadChatHistory(historyId) {
         const history = this.chatHistories.find(h => h.id === historyId);
         if (!history) {
             return;
@@ -544,26 +585,17 @@ class SuperBizAgentApp {
         
         // 加载历史对话
         this.sessionId = history.id;
-        this.currentChatHistory = [...history.messages];
         this.isCurrentChatFromHistory = true; // 标记为从历史记录加载
         
-        // 清空并重新渲染消息
-        if (this.chatMessages) {
-            this.chatMessages.innerHTML = '';
-            history.messages.forEach(msg => {
-                this.addMessage(msg.type, msg.content, false, false); // false表示不是流式，false表示不保存到历史（因为已经存在）
-            });
-        }
-        
-        // 更新UI
-        this.checkAndSetCentered();
+        // 从后端加载消息并渲染
+        await this.loadMessagesFromServer(history.id);
         this.renderChatHistory();
     }
     
     // 删除历史对话
     deleteChatHistory(historyId) {
         this.chatHistories = this.chatHistories.filter(h => h.id !== historyId);
-        this.saveChatHistories();
+        this.deleteSessionOnServer(historyId);
         this.renderChatHistory();
         
         // 如果删除的是当前对话，清空当前对话

@@ -4,6 +4,7 @@ import jakarta.annotation.PreDestroy;
 import org.example.config.SessionStorageProperties;
 import org.example.entity.SessionIndex;
 import org.example.entity.UserAccount;
+import org.example.mapper.ConversationMessageMapper;
 import org.example.mapper.SessionIndexMapper;
 import org.example.mapper.UserAccountMapper;
 import org.example.service.ChatService;
@@ -28,25 +29,25 @@ public class PersistentSessionService {
     private final UserAccountMapper userAccountMapper;
     private final SessionIndexMapper sessionIndexMapper;
     private final RedisSessionStore redisSessionStore;
-    private final FileSessionStore fileSessionStore;
     private final UserMemoryVectorStore userMemoryVectorStore;
     private final SessionStorageProperties storageProperties;
     private final ChatService chatService;
+    private final ConversationMessageMapper conversationMessageMapper;
 
     public PersistentSessionService(UserAccountMapper userAccountMapper,
                                     SessionIndexMapper sessionIndexMapper,
                                     RedisSessionStore redisSessionStore,
-                                    FileSessionStore fileSessionStore,
                                     UserMemoryVectorStore userMemoryVectorStore,
                                     SessionStorageProperties storageProperties,
-                                    ChatService chatService) {
+                                    ChatService chatService,
+                                    ConversationMessageMapper conversationMessageMapper) {
         this.userAccountMapper = userAccountMapper;
         this.sessionIndexMapper = sessionIndexMapper;
         this.redisSessionStore = redisSessionStore;
-        this.fileSessionStore = fileSessionStore;
         this.userMemoryVectorStore = userMemoryVectorStore;
         this.storageProperties = storageProperties;
         this.chatService = chatService;
+        this.conversationMessageMapper = conversationMessageMapper;
     }
 
     @Transactional
@@ -86,6 +87,7 @@ public class PersistentSessionService {
         try {
             return userMemoryVectorStore.searchRelevantMemories(
                     sessionContext.userId(),
+                    sessionContext.sessionId(),
                     currentQuestion,
                     storageProperties.getSemanticTopK()
             );
@@ -95,10 +97,31 @@ public class PersistentSessionService {
         }
     }
 
+    public Optional<String> getSessionSummary(SessionContext sessionContext) {
+        try {
+            return userMemoryVectorStore.getSessionSummary(
+                    sessionContext.userId(), sessionContext.sessionId());
+        } catch (Exception e) {
+            logger.warn("读取会话 {} 的 Milvus 摘要失败: {}", sessionContext.sessionId(), e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     @Transactional
     public int appendConversation(SessionContext sessionContext, String userQuestion, String aiAnswer, ChatService chatService) {
+        // 写入 Redis（短期）+ JSON 归档
         redisSessionStore.pushMessage(sessionContext.userId(), sessionContext.sessionId(), ChatMessage.user(userQuestion));
         redisSessionStore.pushMessage(sessionContext.userId(), sessionContext.sessionId(), ChatMessage.assistant(aiAnswer));
+
+        // 写入 MySQL（长期持久化）
+        int currentIndex = conversationMessageMapper.getMaxIndex(sessionContext.sessionId());
+        ChatMessage userMsg = ChatMessage.user(userQuestion);
+        userMsg.setMsgIndex(currentIndex + 1);
+        conversationMessageMapper.insert(sessionContext.sessionId(), userMsg, currentIndex + 1);
+
+        ChatMessage assistantMsg = ChatMessage.assistant(aiAnswer);
+        assistantMsg.setMsgIndex(currentIndex + 2);
+        conversationMessageMapper.insert(sessionContext.sessionId(), assistantMsg, currentIndex + 2);
 
         SessionIndex sessionIndex = sessionIndexMapper.findBySessionId(sessionContext.sessionId())
                 .orElseThrow(() -> new IllegalStateException("会话索引不存在: " + sessionContext.sessionId()));
@@ -126,10 +149,20 @@ public class PersistentSessionService {
         return nextPairCount;
     }
 
+    /**
+     * 分页加载会话消息
+     * @param sessionId 会话ID
+     * @param afterIndex 已加载的最大序号，从该序号之后加载
+     * @param limit 每页条数
+     */
+    public List<ChatMessage> loadMessagesPage(String sessionId, int afterIndex, int limit) {
+        return redisSessionStore.loadHistoryFromDb(sessionId, afterIndex, limit);
+    }
+
     @Transactional
     public void clearSession(SessionContext sessionContext) {
         redisSessionStore.clearSession(sessionContext.userId(), sessionContext.sessionId());
-        fileSessionStore.replaceMessages(sessionContext.userId(), sessionContext.sessionId(), List.of());
+        conversationMessageMapper.deleteBySessionId(sessionContext.sessionId());
 
         sessionIndexMapper.findBySessionId(sessionContext.sessionId()).ifPresent(index -> {
             index.setMessageCount(0);
@@ -153,34 +186,32 @@ public class PersistentSessionService {
                 });
     }
 
+    /**
+     * 获取指定用户的所有会话列表（按创建时间倒序）
+     */
+    public List<SessionIndex> listUserSessions(Long userId) {
+        if (userId == null) return List.of();
+        List<SessionIndex> sessions = sessionIndexMapper.findByUserId(userId);
+        sessions.removeIf(s -> s.getMessageCount() == null || s.getMessageCount() == 0);
+        sessions.sort((a, b) -> b.getCreatedAt().compareTo(a.getCreatedAt()));
+        return sessions;
+    }
+
     @PreDestroy
     public void compressAllOnShutdown() {
         try {
-            fileSessionStore.flushNow();
-            List<SessionIndex> activeSessions = sessionIndexMapper.findActiveSessions();
-            if (activeSessions.isEmpty()) {
-                logger.info("关闭前压缩：没有需要处理的活跃会话");
+            List<Long> userIds = sessionIndexMapper.findDistinctUserIds();
+            if (userIds.isEmpty()) {
+                logger.info("关闭前压缩：没有需要处理的用户");
                 return;
             }
 
-            logger.info("关闭前压缩：开始处理 {} 个活跃会话", activeSessions.size());
-            for (SessionIndex sessionIndex : activeSessions) {
+            logger.info("关闭前压缩：开始处理 {} 个用户的所有会话", userIds.size());
+            for (Long userId : userIds) {
                 try {
-                    List<ChatMessage> messages = fileSessionStore.readMessages(sessionIndex.getUserId(), sessionIndex.getSessionId());
-                    if (messages.isEmpty()) {
-                        messages = redisSessionStore.getAllWarmMessages(sessionIndex.getUserId(), sessionIndex.getSessionId());
-                    }
-                    if (messages.isEmpty()) {
-                        continue;
-                    }
-
-                    String summary = chatService.summarizeConversationMemory(toHistory(messages));
-                    sessionIndex.setSummary(summary);
-                    sessionIndexMapper.update(sessionIndex);
-                    userMemoryVectorStore.storeSessionSummary(sessionIndex.getUserId(), sessionIndex.getSessionId(), summary);
-                    logger.info("关闭前压缩完成: sessionId={}", sessionIndex.getSessionId());
+                    compressUserSessions(userId);
                 } catch (Exception e) {
-                    logger.warn("关闭前压缩会话失败: sessionId={}, error={}", sessionIndex.getSessionId(), e.getMessage());
+                    logger.warn("关闭前压缩用户 {} 会话失败: {}", userId, e.getMessage());
                 }
             }
         } catch (Exception e) {
@@ -199,19 +230,16 @@ public class PersistentSessionService {
                 return;
             }
 
-            fileSessionStore.flushNow();
             logger.info("用户 {} 开始压缩 {} 个会话", userId, userSessions.size());
 
             for (SessionIndex sessionIndex : userSessions) {
                 try {
-                    if (sessionIndex.getMessageCount() == null || sessionIndex.getMessageCount() == 0) {
+                    int totalPairs = Optional.ofNullable(sessionIndex.getMessageCount()).orElse(0);
+                    if (totalPairs == 0) {
                         continue;
                     }
-
-                    List<ChatMessage> messages = fileSessionStore.readMessages(sessionIndex.getUserId(), sessionIndex.getSessionId());
-                    if (messages.isEmpty()) {
-                        messages = redisSessionStore.getAllWarmMessages(sessionIndex.getUserId(), sessionIndex.getSessionId());
-                    }
+                    // 直接从 MySQL 加载全量消息
+                    List<ChatMessage> messages = loadMessagesPage(sessionIndex.getSessionId(), 0, totalPairs * 2);
                     if (messages.isEmpty()) {
                         continue;
                     }

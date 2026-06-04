@@ -42,6 +42,12 @@ public interface SessionIndexMapper {
     @ResultMap("sessionIndexResultMap")
     List<SessionIndex> findActiveSessions();
 
+    @Select("""
+            SELECT DISTINCT user_id FROM session_index
+            WHERE status = 1
+            """)
+    List<Long> findDistinctUserIds();
+
     @Insert("""
             INSERT INTO session_index(user_id, session_id, title, status, message_count, summary, created_at, updated_at)
             VALUES(#{userId}, #{sessionId}, #{title}, #{status}, #{messageCount}, #{summary}, NOW(), NOW())

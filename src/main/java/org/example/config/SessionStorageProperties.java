@@ -11,16 +11,13 @@ import java.time.Duration;
 @ConfigurationProperties(prefix = "session.storage")
 public class SessionStorageProperties {
 
-    private String path = "./data/sessions";
     private Duration redisTtl = Duration.ofHours(24);
     private int redisMaxMessages = 50;
     private int compressionInterval = 5;
     private int llmContextWindow = 10;
     private int semanticTopK = 3;
-
-    public void setPath(String path) {
-        this.path = path;
-    }
+    private int dbPageSize = 20;
+    private String personaPath = "./data/personas";
 
     public void setRedisTtl(Duration redisTtl) {
         this.redisTtl = redisTtl;
@@ -40,5 +37,13 @@ public class SessionStorageProperties {
 
     public void setSemanticTopK(int semanticTopK) {
         this.semanticTopK = semanticTopK;
+    }
+
+    public void setDbPageSize(int dbPageSize) {
+        this.dbPageSize = dbPageSize;
+    }
+
+    public void setPersonaPath(String personaPath) {
+        this.personaPath = personaPath;
     }
 }

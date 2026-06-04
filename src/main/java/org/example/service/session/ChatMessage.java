@@ -15,7 +15,9 @@ public class ChatMessage {
     private String msgId;
     private String role;
     private String content;
+    private int msgIndex;
     private LocalDateTime timestamp;
+    private LocalDateTime createdAt;
 
     public static ChatMessage user(String content) {
         return of("user", content);

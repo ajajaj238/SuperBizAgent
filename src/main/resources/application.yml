@@ -10,7 +10,7 @@ server:
 file:
   upload:
     path: ./uploads
-    allowed-extensions: txt,md
+    allowed-extensions: txt,md,markdown
 
 milvus:
   host: localhost
@@ -50,6 +50,10 @@ spring:
   sql:
     init:
       mode: always
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 55MB
   ai:
     dashscope:
       api-key: ${DASHSCOPE_API_KEY:}  # 从环境变量读取
@@ -129,12 +133,13 @@ management:
 
 session:
   storage:
-    path: ./data/sessions
+    persona-path: ./data/personas
     redis-ttl: 24h
-    redis-max-messages: 50
+    redis-max-messages: 20
     compression-interval: 5
     llm-context-window: 10
     semantic-top-k: 3
+    db-page-size: 20
 
 mybatis:
   configuration:

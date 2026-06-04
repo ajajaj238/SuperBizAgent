@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.config.SessionStorageProperties;
+import org.example.mapper.ConversationMessageMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -21,17 +22,17 @@ public class RedisSessionStore {
 
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
-    private final FileSessionStore fileSessionStore;
     private final SessionStorageProperties storageProperties;
+    private final ConversationMessageMapper conversationMessageMapper;
 
     public RedisSessionStore(StringRedisTemplate redisTemplate,
                              ObjectMapper objectMapper,
-                             FileSessionStore fileSessionStore,
-                             SessionStorageProperties storageProperties) {
+                             SessionStorageProperties storageProperties,
+                             ConversationMessageMapper conversationMessageMapper) {
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
-        this.fileSessionStore = fileSessionStore;
         this.storageProperties = storageProperties;
+        this.conversationMessageMapper = conversationMessageMapper;
     }
 
     public void bindSessionToUser(Long userId, String sessionId) {
@@ -45,7 +46,6 @@ public class RedisSessionStore {
         redisTemplate.opsForList().trim(key, -storageProperties.getRedisMaxMessages(), -1);
         redisTemplate.expire(key, storageProperties.getRedisTtl());
         bindSessionToUser(userId, sessionId);
-        fileSessionStore.appendMessageAsync(userId, sessionId, msg);
     }
 
     public List<ChatMessage> getRecentMessages(Long userId, String sessionId, int n) {
@@ -54,7 +54,7 @@ public class RedisSessionStore {
         if (raw != null && !raw.isEmpty()) {
             return parse(raw);
         }
-        return reloadFromJson(userId, sessionId);
+        return reloadFromDb(sessionId);
     }
 
     public List<ChatMessage> getAllWarmMessages(Long userId, String sessionId) {
@@ -63,7 +63,7 @@ public class RedisSessionStore {
         if (raw != null && !raw.isEmpty()) {
             return parse(raw);
         }
-        return reloadFromJson(userId, sessionId);
+        return reloadFromDb(sessionId);
     }
 
     public void clearSession(Long userId, String sessionId) {
@@ -71,24 +71,30 @@ public class RedisSessionStore {
         redisTemplate.opsForSet().remove(userSessionsKey(userId), sessionId);
     }
 
-    private List<ChatMessage> reloadFromJson(Long userId, String sessionId) {
-        List<ChatMessage> all = fileSessionStore.readMessages(userId, sessionId);
-        if (all.isEmpty()) {
+    /**
+     * 从 MySQL 加载最近 N 条消息并回填 Redis
+     */
+    private List<ChatMessage> reloadFromDb(String sessionId) {
+        int limit = storageProperties.getRedisMaxMessages();
+        List<ChatMessage> recent = conversationMessageMapper.findRecentBySessionId(sessionId, 0, limit);
+        if (recent.isEmpty()) {
             return List.of();
         }
-
-        int maxMessages = storageProperties.getRedisMaxMessages();
-        List<ChatMessage> recent = all.size() > maxMessages
-                ? all.subList(all.size() - maxMessages, all.size())
-                : all;
 
         String key = sessionKey(sessionId);
         for (ChatMessage message : recent) {
             redisTemplate.opsForList().rightPush(key, toJson(message));
         }
         redisTemplate.expire(key, storageProperties.getRedisTtl());
-        logger.info("Redis 会话 {} 未命中，已从 JSON 恢复 {} 条消息", sessionId, recent.size());
+        logger.info("Redis 会话 {} 未命中，已从 MySQL 恢复 {} 条消息", sessionId, recent.size());
         return new ArrayList<>(recent);
+    }
+
+    /**
+     * 分页加载历史消息（用户滚动加载）
+     */
+    public List<ChatMessage> loadHistoryFromDb(String sessionId, int afterIndex, int limit) {
+        return conversationMessageMapper.findRecentBySessionId(sessionId, afterIndex, limit);
     }
 
     private List<ChatMessage> parse(List<String> raw) {

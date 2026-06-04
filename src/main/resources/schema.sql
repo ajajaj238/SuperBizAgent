@@ -26,3 +26,15 @@ CREATE TABLE IF NOT EXISTS session_index (
     INDEX idx_session_user_id (user_id),
     INDEX idx_session_session_id (session_id)
 );
+
+CREATE TABLE IF NOT EXISTS conversation_message (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    session_id VARCHAR(64) NOT NULL,
+    msg_id VARCHAR(64) NOT NULL UNIQUE,
+    role VARCHAR(16) NOT NULL,
+    content TEXT NOT NULL,
+    msg_index INT NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_cv_session_id (session_id),
+    INDEX idx_cv_session_seq (session_id, msg_index)
+);

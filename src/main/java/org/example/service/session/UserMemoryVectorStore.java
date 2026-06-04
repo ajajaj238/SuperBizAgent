@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -62,8 +63,41 @@ public class UserMemoryVectorStore {
         }
     }
 
-    public List<String> searchRelevantMemories(Long userId, String currentQuestion, int topK) {
-        if (userId == null || currentQuestion == null || currentQuestion.isBlank()) {
+    /**
+     * 按 sessionId 查询单条会话摘要（精准查询）
+     */
+    public Optional<String> getSessionSummary(Long userId, String sessionId) {
+        if (userId == null || sessionId == null || sessionId.isBlank()) {
+            return Optional.empty();
+        }
+        ensureCollectionLoaded();
+        SearchParam searchParam = SearchParam.newBuilder()
+                .withCollectionName(MilvusConstants.USER_MEMORIES_COLLECTION_NAME)
+                .withVectorFieldName("embedding")
+                .withVectors(Collections.singletonList(Collections.nCopies(
+                        MilvusConstants.VECTOR_DIM, 0.0f)))
+                .withTopK(1)
+                .withExpr("user_id == " + userId + " and session_id == \"" + sessionId + "\"")
+                .withMetricType(io.milvus.param.MetricType.COSINE)
+                .withOutFields(List.of("insight"))
+                .build();
+
+        R<SearchResults> response = milvusClient.search(searchParam);
+        if (response.getStatus() != 0) {
+            return Optional.empty();
+        }
+
+        SearchResultsWrapper wrapper = new SearchResultsWrapper(response.getData().getResults());
+        int rowCount = wrapper.getRowRecords(0).size();
+        if (rowCount == 0) {
+            return Optional.empty();
+        }
+        Object insight = wrapper.getFieldData("insight", 0).get(0);
+        return Optional.ofNullable(insight).map(Object::toString);
+    }
+
+    public List<String> searchRelevantMemories(Long userId, String sessionId, String currentQuestion, int topK) {
+        if (userId == null || sessionId == null || sessionId.isBlank() || currentQuestion == null || currentQuestion.isBlank()) {
             return List.of();
         }
 
@@ -74,7 +108,7 @@ public class UserMemoryVectorStore {
                 .withVectorFieldName("embedding")
                 .withVectors(Collections.singletonList(queryVector))
                 .withTopK(topK)
-                .withExpr("user_id == " + userId)
+                .withExpr("user_id == " + userId + " and session_id == \"" + sessionId + "\"")
                 .withMetricType(io.milvus.param.MetricType.COSINE)
                 .withOutFields(List.of("session_id", "insight", "created_at"))
                 .withParams("{\"nprobe\":10}")
