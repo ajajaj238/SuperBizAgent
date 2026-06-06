@@ -7,6 +7,7 @@ import org.example.entity.UserAccount;
 import org.example.mapper.ConversationMessageMapper;
 import org.example.mapper.SessionIndexMapper;
 import org.example.mapper.UserAccountMapper;
+import org.example.monitor.TokenEstimator;
 import org.example.service.ChatService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,6 +25,7 @@ import java.util.UUID;
 public class PersistentSessionService {
 
     private static final Logger logger = LoggerFactory.getLogger(PersistentSessionService.class);
+    private static final Logger compressionLogger = LoggerFactory.getLogger("ai.memory.compression");
     private static final String DEFAULT_USERNAME = "default-user";
 
     private final UserAccountMapper userAccountMapper;
@@ -131,18 +133,62 @@ public class PersistentSessionService {
             sessionIndex.setTitle(buildTitle(userQuestion));
         }
 
-        if (nextPairCount % storageProperties.getCompressionInterval() == 0) {
-            String summary = chatService.summarizeConversationMemory(toHistory(
-                    redisSessionStore.getAllWarmMessages(sessionContext.userId(), sessionContext.sessionId())
-            ));
+        List<ChatMessage> warmMessages = redisSessionStore.getAllWarmMessages(
+                sessionContext.userId(), sessionContext.sessionId());
+        // 判断是否需要压缩
+        CompressionDecision compressionDecision = shouldCompress(
+                sessionContext.sessionId(), nextPairCount, userQuestion, aiAnswer, warmMessages);
+        if (compressionDecision.shouldCompress()) {
+            long startedAt = System.currentTimeMillis();
+            String previousSummary = sessionIndex.getSummary();
+            String summary = chatService.summarizeConversationMemory(previousSummary, toHistory(warmMessages));
+            int summaryTokens = TokenEstimator.estimateTextTokens(summary);
+            boolean milvusStored = true;
             sessionIndex.setSummary(summary);
             try {
                 userMemoryVectorStore.storeSessionSummary(sessionContext.userId(), sessionContext.sessionId(), summary);
             } catch (Exception e) {
+                milvusStored = false;
                 logger.warn("会话 {} 写入 Milvus 语义记忆失败，已保留 MySQL 摘要: {}",
                         sessionContext.sessionId(), e.getMessage());
             }
-            logger.info("会话 {} 已更新持久化摘要", sessionContext.sessionId());
+            long durationMs = System.currentTimeMillis() - startedAt;
+            logger.info("会话 {} 已更新持久化摘要，触发原因: {}, 热消息数: {}, 估算token: {}",
+                    sessionContext.sessionId(),
+                    compressionDecision.reason(),
+                    compressionDecision.warmMessageCount(),
+                    compressionDecision.estimatedTokens());
+            compressionLogger.info(
+                    "event=session_compression_completed userId={} sessionId={} reason={} pairCount={} warmMessages={} newMessages={} estimatedTokens={} currentExchangeTokens={} tokenThreshold={} redisThreshold={} previousSummaryChars={} newSummaryChars={} newSummaryTokens={} compressionRatio={} durationMs={} milvusStored={}",
+                    sessionContext.userId(),
+                    sessionContext.sessionId(),
+                    compressionDecision.reason(),
+                    nextPairCount,
+                    compressionDecision.warmMessageCount(),
+                    compressionDecision.newMessageCount(),
+                    compressionDecision.estimatedTokens(),
+                    compressionDecision.currentExchangeTokens(),
+                    compressionDecision.tokenThreshold(),
+                    compressionDecision.redisThreshold(),
+                    textLength(previousSummary),
+                    textLength(summary),
+                    summaryTokens,
+                    formatRatio(summaryTokens, compressionDecision.estimatedTokens()),
+                    durationMs,
+                    milvusStored);
+            redisSessionStore.markCompressed(sessionContext.sessionId(), nextPairCount);
+        } else {
+            compressionLogger.debug(
+                    "event=session_compression_skipped sessionId={} reason={} pairCount={} warmMessages={} newMessages={} estimatedTokens={} currentExchangeTokens={} tokenThreshold={} redisThreshold={}",
+                    sessionContext.sessionId(),
+                    compressionDecision.reason(),
+                    nextPairCount,
+                    compressionDecision.warmMessageCount(),
+                    compressionDecision.newMessageCount(),
+                    compressionDecision.estimatedTokens(),
+                    compressionDecision.currentExchangeTokens(),
+                    compressionDecision.tokenThreshold(),
+                    compressionDecision.redisThreshold());
         }
 
         sessionIndexMapper.update(sessionIndex);
@@ -244,10 +290,33 @@ public class PersistentSessionService {
                         continue;
                     }
 
-                    String summary = chatService.summarizeConversationMemory(toHistory(messages));
+                    long startedAt = System.currentTimeMillis();
+                    String previousSummary = sessionIndex.getSummary();
+                    int sourceTokens = estimateMessagesTokens(messages);
+                    String summary = chatService.summarizeConversationMemory(previousSummary, toHistory(messages));
+                    int summaryTokens = TokenEstimator.estimateTextTokens(summary);
                     sessionIndex.setSummary(summary);
                     sessionIndexMapper.update(sessionIndex);
                     userMemoryVectorStore.storeSessionSummary(sessionIndex.getUserId(), sessionIndex.getSessionId(), summary);
+                    redisSessionStore.markCompressed(sessionIndex.getSessionId(), totalPairs);
+                    compressionLogger.info(
+                            "event=session_compression_completed userId={} sessionId={} reason={} pairCount={} warmMessages={} newMessages={} estimatedTokens={} currentExchangeTokens={} tokenThreshold={} redisThreshold={} previousSummaryChars={} newSummaryChars={} newSummaryTokens={} compressionRatio={} durationMs={} milvusStored={}",
+                            sessionIndex.getUserId(),
+                            sessionIndex.getSessionId(),
+                            "manual_or_shutdown",
+                            totalPairs,
+                            messages.size(),
+                            messages.size(),
+                            sourceTokens,
+                            0,
+                            storageProperties.getCompressionTokenThreshold(),
+                            redisThreshold(),
+                            textLength(previousSummary),
+                            textLength(summary),
+                            summaryTokens,
+                            formatRatio(summaryTokens, sourceTokens),
+                            System.currentTimeMillis() - startedAt,
+                            true);
                     logger.info("用户 {} 会话 {} 摘要已保存到 Milvus", userId, sessionIndex.getSessionId());
                 } catch (Exception e) {
                     logger.warn("用户 {} 会话 {} 压缩失败: {}", userId, sessionIndex.getSessionId(), e.getMessage());
@@ -301,5 +370,89 @@ public class PersistentSessionService {
             history.add(item);
         }
         return history;
+    }
+
+    private CompressionDecision shouldCompress(String sessionId,
+                                               int nextPairCount,
+                                               String userQuestion,
+                                               String aiAnswer,
+                                               List<ChatMessage> warmMessages) {
+        int warmMessageCount = warmMessages == null ? 0 : warmMessages.size();
+        int estimatedTokens = estimateMessagesTokens(warmMessages);
+        int currentExchangeTokens = TokenEstimator.estimateTextTokens(
+                (userQuestion == null ? "" : userQuestion) + "\n" + (aiAnswer == null ? "" : aiAnswer));
+        int lastCompressedPairCount = redisSessionStore.getLastCompressedPairCount(sessionId);
+        int newMessageCount = Math.max(0, nextPairCount - lastCompressedPairCount) * 2;
+        int minMessages = Math.max(1, storageProperties.getCompressionMinMessages());
+        int tokenThreshold = storageProperties.getCompressionTokenThreshold();
+        int redisThreshold = redisThreshold();
+        //第一层：根据token上限判断是否压缩
+        if (tokenThreshold > 0
+                && (currentExchangeTokens >= tokenThreshold || (estimatedTokens >= tokenThreshold && newMessageCount >= minMessages))) {
+            return new CompressionDecision(true, "token_budget", warmMessageCount, estimatedTokens,
+                    currentExchangeTokens, newMessageCount, tokenThreshold, redisThreshold);
+        }
+
+        //第二层：根据Redis消息上限判断是否压缩
+        if (warmMessageCount >= redisThreshold
+                && newMessageCount >= minMessages) {
+            return new CompressionDecision(true, "redis_near_limit", warmMessageCount, estimatedTokens,
+                    currentExchangeTokens, newMessageCount, tokenThreshold, redisThreshold);
+        }
+
+        //第三层判断：固定轮次周期检查。
+        int interval = storageProperties.getCompressionInterval();
+        if (interval > 0
+                && nextPairCount % interval == 0
+                && newMessageCount >= minMessages) {
+            return new CompressionDecision(true, "periodic_check", warmMessageCount, estimatedTokens,
+                    currentExchangeTokens, newMessageCount, tokenThreshold, redisThreshold);
+        }
+
+        return new CompressionDecision(false, "skip", warmMessageCount, estimatedTokens,
+                currentExchangeTokens, newMessageCount, tokenThreshold, redisThreshold);
+    }
+
+    private int estimateMessagesTokens(List<ChatMessage> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return 0;
+        }
+        StringBuilder text = new StringBuilder();
+        for (ChatMessage message : messages) {
+            if (message.getRole() != null) {
+                text.append(message.getRole()).append(": ");
+            }
+            if (message.getContent() != null) {
+                text.append(message.getContent());
+            }
+            text.append('\n');
+        }
+        return TokenEstimator.estimateTextTokens(text.toString());
+    }
+
+    private int redisThreshold() {
+        return Math.max(1, (int) Math.ceil(
+                storageProperties.getRedisMaxMessages() * storageProperties.getCompressionRedisUsageRatio()));
+    }
+
+    private int textLength(String text) {
+        return text == null ? 0 : text.length();
+    }
+
+    private String formatRatio(int compressedTokens, int originalTokens) {
+        if (originalTokens <= 0) {
+            return "0.000";
+        }
+        return "%.3f".formatted((double) compressedTokens / originalTokens);
+    }
+
+    private record CompressionDecision(boolean shouldCompress,
+                                       String reason,
+                                       int warmMessageCount,
+                                       int estimatedTokens,
+                                       int currentExchangeTokens,
+                                       int newMessageCount,
+                                       int tokenThreshold,
+                                       int redisThreshold) {
     }
 }
