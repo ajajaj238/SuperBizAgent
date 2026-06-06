@@ -579,12 +579,20 @@ public class ChatService {
      * 将短期对话历史压缩成 2-3 句话，保留核心问题、关键参数和已完成事项。
      */
     public String summarizeConversationMemory(List<Map<String, String>> history) {
+        return summarizeConversationMemory(null, history);
+    }
+
+    /**
+     * 将既有摘要与新增热消息融合成新的会话主摘要，避免覆盖摘要时丢失早期关键信息。
+     */
+    public String summarizeConversationMemory(String previousSummary, List<Map<String, String>> history) {
         if (history == null || history.isEmpty()) {
-            return "近期对话暂无可压缩的历史信息。";
+            String safePreviousSummary = sanitizeMemoryText(previousSummary);
+            return safePreviousSummary.isBlank() ? "近期对话暂无可压缩的历史信息。" : safePreviousSummary;
         }
 
         try {
-            String llmSummary = summarizeConversationMemoryWithLlm(history);
+            String llmSummary = summarizeConversationMemoryWithLlm(previousSummary, history);
             if (llmSummary != null && !llmSummary.isBlank()) {
                 logger.info("短期记忆压缩完成（LLM），原始消息数: {}, 摘要长度: {}", history.size(), llmSummary.length());
                 return llmSummary.trim();
@@ -593,31 +601,44 @@ public class ChatService {
             logger.warn("LLM 摘要失败，回退规则摘要: {}", e.getMessage());
         }
 
-        String fallback = summarizeConversationMemoryByRules(history);
+        String fallback = summarizeConversationMemoryByRules(previousSummary, history);
         logger.info("短期记忆压缩完成（规则回退），原始消息数: {}, 摘要长度: {}", history.size(), fallback.length());
         return fallback;
     }
 
-    private String summarizeConversationMemoryWithLlm(List<Map<String, String>> history) {
+    private String summarizeConversationMemoryWithLlm(String previousSummary, List<Map<String, String>> history) {
         DashScopeApi dashScopeApi = createDashScopeApi();
         DashScopeChatModel summaryModel = createChatModel(dashScopeApi, 0.2, memorySummaryMaxToken, 0.8);
 
         String historyText = buildConversationHistoryText(history);
+        String safePreviousSummary = sanitizeMemoryText(
+                promptSecurityService.sanitizeForPrompt(previousSummary, "memory_previous_summary"));
         String systemInstruction = """
-                你是会话记忆压缩助手。请将多轮对话压缩为 2-3 句中文摘要，供后续对话延续上下文。
+                你是会话记忆压缩助手。请融合旧摘要与新增对话，生成新的会话主摘要，供后续对话延续上下文。
                 摘要必须覆盖：
-                1) 用户核心问题与目标
-                2) 关键参数、配置、限制条件
-                3) 已完成/已确认的事项与当前未决问题
+                - 用户核心目标
+                - 关键事实、参数、配置、限制条件
+                - 已完成/已确认事项
+                - 当前未决问题
+                - 用户偏好与禁止遗忘的信息
                 要求：
-                - 只输出摘要正文，不要加标题、编号、前后缀说明
+                - 固定输出以下字段：用户目标、关键事实、重要参数、已完成事项、未决问题、用户偏好、禁止遗忘
+                - 字段无内容时写“无”
                 - 禁止编造历史中未出现的信息
-                - 用简洁、可执行的表达
+                - 删除寒暄、重复确认、过期临时信息
+                - 新增对话与旧摘要冲突时，以新增对话为准
+                - 总长度控制在 1200 个中文字符以内
                 """;
 
         Prompt prompt = new Prompt(List.of(
                 new SystemMessage(systemInstruction),
-                new UserMessage("请压缩以下会话历史为 2-3 句话：\n\n" + historyText)
+                new UserMessage("""
+                        旧摘要：
+                        %s
+
+                        新增对话：
+                        %s
+                        """.formatted(safePreviousSummary.isBlank() ? "无" : safePreviousSummary, historyText))
         ));
 
         ChatResponse response = summaryModel.call(prompt);
@@ -642,10 +663,11 @@ public class ChatService {
         return sb.toString();
     }
 
-    private String summarizeConversationMemoryByRules(List<Map<String, String>> history) {
+    private String summarizeConversationMemoryByRules(String previousSummary, List<Map<String, String>> history) {
         Set<String> userTopics = new LinkedHashSet<>();
         Set<String> importantParams = new LinkedHashSet<>();
         Set<String> resolvedItems = new LinkedHashSet<>();
+        String safePreviousSummary = sanitizeMemoryText(previousSummary);
 
         for (Map<String, String> message : history) {
             String role = message.get("role");
@@ -664,6 +686,9 @@ public class ChatService {
         }
 
         List<String> sentences = new ArrayList<>();
+        if (!safePreviousSummary.isBlank()) {
+            sentences.add("既有摘要：" + safePreviousSummary + "。");
+        }
         if (!userTopics.isEmpty()) {
             sentences.add("近期对话主要围绕：" + joinTopItems(userTopics, 3) + "。");
         }
@@ -678,8 +703,8 @@ public class ChatService {
             sentences.add("近期对话主要围绕连续的业务问题排查与方案确认。");
         }
 
-        if (sentences.size() > 3) {
-            sentences = new ArrayList<>(sentences.subList(0, 3));
+        if (sentences.size() > 4) {
+            sentences = new ArrayList<>(sentences.subList(0, 4));
         }
 
         return String.join("", sentences);

@@ -137,6 +137,9 @@ session:
     redis-ttl: 24h
     redis-max-messages: 20
     compression-interval: 5
+    compression-token-threshold: 3000
+    compression-min-messages: 6
+    compression-redis-usage-ratio: 0.8
     llm-context-window: 10
     semantic-top-k: 3
     db-page-size: 20
