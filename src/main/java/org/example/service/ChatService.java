@@ -685,29 +685,34 @@ public class ChatService {
             collectImportantParams(content, importantParams);
         }
 
-        List<String> sentences = new ArrayList<>();
-        if (!safePreviousSummary.isBlank()) {
-            sentences.add("既有摘要：" + safePreviousSummary + "。");
-        }
-        if (!userTopics.isEmpty()) {
-            sentences.add("近期对话主要围绕：" + joinTopItems(userTopics, 3) + "。");
-        }
-        if (!importantParams.isEmpty()) {
-            sentences.add("过程中提到的重要参数或对象包括：" + joinTopItems(importantParams, 6) + "。");
-        }
-        if (!resolvedItems.isEmpty()) {
-            sentences.add("已经明确或处理过的事项包括：" + joinTopItems(resolvedItems, 3) + "。");
-        }
+        String userGoal = userTopics.isEmpty()
+                ? "无"
+                : joinTopItems(userTopics, 3);
+        String keyFacts = safePreviousSummary.isBlank()
+                ? "无"
+                : safePreviousSummary;
+        String params = importantParams.isEmpty()
+                ? "无"
+                : joinTopItems(importantParams, 6);
+        String completed = resolvedItems.isEmpty()
+                ? "无"
+                : joinTopItems(resolvedItems, 3);
 
-        if (sentences.isEmpty()) {
-            sentences.add("近期对话主要围绕连续的业务问题排查与方案确认。");
-        }
-
-        if (sentences.size() > 4) {
-            sentences = new ArrayList<>(sentences.subList(0, 4));
-        }
-
-        return String.join("", sentences);
+        return """
+                用户目标：%s
+                关键事实：%s
+                重要参数：%s
+                已完成事项：%s
+                未决问题：无
+                用户偏好：无
+                禁止遗忘：%s
+                """.formatted(
+                userGoal,
+                keyFacts,
+                params,
+                completed,
+                keyFacts
+        ).trim();
     }
 
     private void collectImportantParams(String content, Set<String> importantParams) {
