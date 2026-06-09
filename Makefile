@@ -4,6 +4,9 @@
 # 配置变量
 SERVER_URL = http://localhost:9900
 UPLOAD_API = $(SERVER_URL)/api/upload
+LOGIN_API = $(SERVER_URL)/api/auth/login
+UPLOAD_USERNAME ?= admin
+UPLOAD_PASSWORD ?= admin123
 DOCS_DIR = aiops-docs
 HEALTH_CHECK_API = $(SERVER_URL)/milvus/health
 DOCKER_COMPOSE_FILE = vector-database.yml
@@ -119,7 +122,18 @@ upload:
 		echo "$(RED)❌ 目录 $(DOCS_DIR) 不存在！$(NC)"; \
 		exit 1; \
 	fi
-	@count=0; \
+	@login_response=$$(curl -s -X POST $(LOGIN_API) \
+		-H "Content-Type: application/json" \
+		-d '{"username":"$(UPLOAD_USERNAME)","password":"$(UPLOAD_PASSWORD)"}'); \
+	token=$$(echo "$$login_response" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p'); \
+	if [ -z "$$token" ]; then \
+		echo "$(RED)❌ 上传前登录失败，无法获取 JWT token$(NC)"; \
+		echo "$$login_response"; \
+		echo "$(YELLOW)请确认种子用户已初始化，默认账号: $(UPLOAD_USERNAME)/$(UPLOAD_PASSWORD)$(NC)"; \
+		exit 1; \
+	fi; \
+	echo "$(GREEN)✅ 上传用户登录成功: $(UPLOAD_USERNAME)$(NC)"; \
+	count=0; \
 	success=0; \
 	failed=0; \
 	for file in $(DOCS_DIR)/*.md; do \
@@ -129,7 +143,8 @@ upload:
 			echo "$(YELLOW)  [$$count] 上传文件: $$filename$(NC)"; \
 			response=$$(curl -s -w "\n%{http_code}" -X POST $(UPLOAD_API) \
 				-F "file=@$$file" \
-				-H "Accept: application/json"); \
+				-H "Accept: application/json" \
+				-H "Authorization: Bearer $$token"); \
 			http_code=$$(echo "$$response" | tail -n1); \
 			body=$$(echo "$$response" | sed '$$d'); \
 			if [ "$$http_code" = "200" ]; then \

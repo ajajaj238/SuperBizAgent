@@ -30,23 +30,24 @@ public class DataInitializer implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
-        if (userAccountMapper.findUser() > 0) {
-            logger.info("种子用户已存在，跳过初始化");
-            return;
-        }
-
         List<UserAccount> seedUsers = List.of(
                 createUser("admin", "admin123", "系统管理员", "admin"),
                 createUser("zhangsan", "admin123", "张三", "user"),
                 createUser("lisi", "admin123", "李四", "user")
         );
 
+        int created = 0;
         for (UserAccount user : seedUsers) {
+            if (userAccountMapper.findByUsername(user.getUsername()).isPresent()) {
+                logger.info("种子用户已存在，跳过: {}", user.getUsername());
+                continue;
+            }
             userAccountMapper.insert(user);
+            created++;
             logger.info("创建种子用户: {} ({})", user.getUsername(), user.getDisplayName());
         }
 
-        logger.info("种子用户初始化完成，共 {} 人", seedUsers.size());
+        logger.info("种子用户初始化完成，新增 {} 人", created);
     }
 
     private UserAccount createUser(String username, String password, String displayName, String role) {

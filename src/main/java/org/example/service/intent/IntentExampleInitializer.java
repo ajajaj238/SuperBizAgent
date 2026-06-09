@@ -133,6 +133,7 @@ public class IntentExampleInitializer implements ApplicationRunner {
                         "当前时间"),
                 UserIntent.CHITCHAT, List.of(
                         "你好",
+                        "你好，我是王杰",
                         "你是谁",
                         "你能做什么",
                         "介绍一下你自己",
