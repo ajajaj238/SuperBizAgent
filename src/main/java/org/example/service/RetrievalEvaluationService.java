@@ -45,6 +45,11 @@ public class RetrievalEvaluationService {
     public void loadDataset() {
         caseIndex.clear();
 
+        if (!properties.isEnabled()) {
+            logger.info("离线检索测评集未启用，跳过加载");
+            return;
+        }
+
         String datasetLocation = properties.getDatasetLocation();
         if (datasetLocation == null || datasetLocation.isBlank()) {
             logger.warn("检索评测集路径为空，跳过加载");

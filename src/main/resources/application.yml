@@ -100,10 +100,16 @@ document:
 rag:
   top-k: 4  # 检索返回的最相似文档数量
   model: "qwen3-max"  # 大语言模型名称 实际没有使用（用的默认的qwen-plus）
-  evaluation:
+  query-rewrite:
     enabled: true
-    log-no-labels: true
-    dataset-location: classpath:retrieval-eval.json
+    llm-enabled: true
+    llm-max-token: 256
+    max-context-chars: 80
+    max-rewritten-chars: 160
+  evaluation:
+    enabled: false  # 离线检索测评集总开关：开发/正常聊天建议关闭，需要评测 hit@k、MRR 时再打开
+    log-no-labels: false  # 开启后，未命中测评样本的问题也会写评测日志；日志较多，调试时可改为 false
+    dataset-location: classpath:retrieval-eval.json  # 可切换为其他离线测评集路径，例如 file:./eval/retrieval-eval.json
   rerank:
     enabled: true  # 是否启用检索结果重排
     candidate-top-k: 8  # 先召回候选数量，再重排截断到 rag.top-k
