@@ -69,6 +69,7 @@ public class RedisSessionStore {
     public void clearSession(Long userId, String sessionId) {
         redisTemplate.delete(sessionKey(sessionId));
         redisTemplate.delete(compressionPairCountKey(sessionId));
+        redisTemplate.delete(personaExtractionPairCountKey(sessionId));
         redisTemplate.opsForSet().remove(userSessionsKey(userId), sessionId);
     }
 
@@ -88,6 +89,26 @@ public class RedisSessionStore {
     public void markCompressed(String sessionId, int pairCount) {
         redisTemplate.opsForValue().set(
                 compressionPairCountKey(sessionId),
+                String.valueOf(pairCount),
+                storageProperties.getRedisTtl());
+    }
+
+    public int getLastPersonaExtractedPairCount(String sessionId) {
+        String value = redisTemplate.opsForValue().get(personaExtractionPairCountKey(sessionId));
+        if (value == null || value.isBlank()) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            logger.warn("解析会话 {} 上次画像抽取轮数失败: {}", sessionId, e.getMessage());
+            return 0;
+        }
+    }
+
+    public void markPersonaExtracted(String sessionId, int pairCount) {
+        redisTemplate.opsForValue().set(
+                personaExtractionPairCountKey(sessionId),
                 String.valueOf(pairCount),
                 storageProperties.getRedisTtl());
     }
@@ -148,5 +169,9 @@ public class RedisSessionStore {
 
     private String compressionPairCountKey(String sessionId) {
         return "session:%s:compressed:pairs".formatted(sessionId);
+    }
+
+    private String personaExtractionPairCountKey(String sessionId) {
+        return "session:%s:persona:extracted:pairs".formatted(sessionId);
     }
 }

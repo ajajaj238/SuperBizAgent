@@ -150,6 +150,15 @@ session:
     semantic-top-k: 3
     db-page-size: 20
 
+persona:
+  extraction:
+    enabled: true
+    llm-enabled: true
+    interval-rounds: 5
+    min-new-messages: 6
+    min-confidence: 0.65
+    max-analysis-messages: 12
+
 mybatis:
   configuration:
     map-underscore-to-camel-case: true

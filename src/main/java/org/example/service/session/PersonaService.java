@@ -10,9 +10,12 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.List;
 import java.util.stream.Stream;
 
 /**
@@ -70,7 +73,18 @@ public class PersonaService {
      */
     public UserPersona getPersona(Long userId) {
         if (userId == null) return null;
-        return personaCache.get(userId, this::loadFromFile);
+        UserPersona cached = personaCache.getIfPresent(userId);
+        if (cached != null) {
+            return cached;
+        }
+        UserPersona persona = loadFromFile(userId);
+        if (persona == null) {
+            persona = createDefaultPersona(userId);
+            savePersona(userId, persona);
+        } else {
+            personaCache.put(userId, persona);
+        }
+        return persona;
     }
 
     /**
@@ -79,6 +93,7 @@ public class PersonaService {
     public void savePersona(Long userId, UserPersona persona) {
         if (userId == null || persona == null) return;
         try {
+            normalizeBeforeSave(userId, persona);
             Files.createDirectories(personaDir);
             Path file = personaDir.resolve(userId + ".json");
             objectMapper.writerWithDefaultPrettyPrinter().writeValue(file.toFile(), persona);
@@ -99,7 +114,8 @@ public class PersonaService {
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("\n【用户画像】\n");
+        sb.append("\n【用户画像，仅供静默参考】\n");
+        sb.append("请只用这些信息调整回答风格和必要上下文，不要在回答中提到“用户画像”或显式复述画像来源。\n");
 
         var personaData = persona.getPersona();
         if (personaData.getOccupationRole() != null && !personaData.getOccupationRole().isEmpty()) {
@@ -120,11 +136,6 @@ public class PersonaService {
                     .append(", 详细程度=").append(pref.getResponseVerbosity())
                     .append("\n");
         }
-        if (personaData.getContextualMemos() != null && !personaData.getContextualMemos().isEmpty()) {
-            sb.append("当前上下文:\n");
-            personaData.getContextualMemos().forEach(m ->
-                    sb.append("  - ").append(m.getTopic()).append(": ").append(m.getContent()).append("\n"));
-        }
 
         return sb.toString();
     }
@@ -139,6 +150,71 @@ public class PersonaService {
         } catch (IOException e) {
             logger.warn("加载用户画像失败: userId={}, error={}", userId, e.getMessage());
             return null;
+        }
+    }
+
+    private UserPersona createDefaultPersona(Long userId) {
+        UserPersona persona = new UserPersona();
+        persona.setUserId(userId);
+        persona.setVersion(1);
+        persona.setUpdatedAt(LocalDateTime.now());
+        persona.setGeneratedBy("default");
+
+        UserPersona.Persona data = new UserPersona.Persona();
+        data.setOccupationRole(new ArrayList<>());
+        data.setExpertiseDomains(new ArrayList<>());
+        data.setFrequentActions(new ArrayList<>());
+
+        UserPersona.Preferences preferences = new UserPersona.Preferences();
+        preferences.setPreferredLanguage("zh-CN");
+        preferences.setResponseVerbosity("normal");
+        preferences.setFavoriteTools(new ArrayList<>());
+        data.setPreferences(preferences);
+        persona.setPersona(data);
+        persona.setInferredFacts(new ArrayList<>());
+
+        UserPersona.Provenance provenance = new UserPersona.Provenance();
+        provenance.setTotalSessionsAnalyzed(0);
+        provenance.setDataSources(List.of("default"));
+        persona.setProvenance(provenance);
+        return persona;
+    }
+
+    private void normalizeBeforeSave(Long userId, UserPersona persona) {
+        persona.setUserId(userId);
+        persona.setVersion(Math.max(1, persona.getVersion()));
+        persona.setUpdatedAt(LocalDateTime.now());
+        if (persona.getGeneratedBy() == null || persona.getGeneratedBy().isBlank()) {
+            persona.setGeneratedBy("system");
+        }
+        if (persona.getPersona() == null) {
+            persona.setPersona(new UserPersona.Persona());
+        }
+        UserPersona.Persona data = persona.getPersona();
+        if (data.getOccupationRole() == null) {
+            data.setOccupationRole(new ArrayList<>());
+        }
+        if (data.getExpertiseDomains() == null) {
+            data.setExpertiseDomains(new ArrayList<>());
+        }
+        if (data.getFrequentActions() == null) {
+            data.setFrequentActions(new ArrayList<>());
+        }
+        if (data.getPreferences() == null) {
+            UserPersona.Preferences preferences = new UserPersona.Preferences();
+            preferences.setPreferredLanguage("zh-CN");
+            preferences.setResponseVerbosity("normal");
+            preferences.setFavoriteTools(new ArrayList<>());
+            data.setPreferences(preferences);
+        }
+        if (persona.getInferredFacts() == null) {
+            persona.setInferredFacts(new ArrayList<>());
+        }
+        if (persona.getProvenance() == null) {
+            UserPersona.Provenance provenance = new UserPersona.Provenance();
+            provenance.setTotalSessionsAnalyzed(0);
+            provenance.setDataSources(new ArrayList<>());
+            persona.setProvenance(provenance);
         }
     }
 }

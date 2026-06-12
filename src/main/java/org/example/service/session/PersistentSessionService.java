@@ -35,6 +35,7 @@ public class PersistentSessionService {
     private final SessionStorageProperties storageProperties;
     private final ChatService chatService;
     private final ConversationMessageMapper conversationMessageMapper;
+    private final PersonaExtractionService personaExtractionService;
 
     public PersistentSessionService(UserAccountMapper userAccountMapper,
                                     SessionIndexMapper sessionIndexMapper,
@@ -42,7 +43,8 @@ public class PersistentSessionService {
                                     UserMemoryVectorStore userMemoryVectorStore,
                                     SessionStorageProperties storageProperties,
                                     ChatService chatService,
-                                    ConversationMessageMapper conversationMessageMapper) {
+                                    ConversationMessageMapper conversationMessageMapper,
+                                    PersonaExtractionService personaExtractionService) {
         this.userAccountMapper = userAccountMapper;
         this.sessionIndexMapper = sessionIndexMapper;
         this.redisSessionStore = redisSessionStore;
@@ -50,6 +52,7 @@ public class PersistentSessionService {
         this.storageProperties = storageProperties;
         this.chatService = chatService;
         this.conversationMessageMapper = conversationMessageMapper;
+        this.personaExtractionService = personaExtractionService;
     }
 
     @Transactional
@@ -191,6 +194,7 @@ public class PersistentSessionService {
                     compressionDecision.redisThreshold());
         }
 
+        triggerPersonaExtraction(sessionContext, nextPairCount, warmMessages);
         sessionIndexMapper.update(sessionIndex);
         return nextPairCount;
     }
@@ -433,6 +437,28 @@ public class PersistentSessionService {
     private int redisThreshold() {
         return Math.max(1, (int) Math.ceil(
                 storageProperties.getRedisMaxMessages() * storageProperties.getCompressionRedisUsageRatio()));
+    }
+
+    private void triggerPersonaExtraction(SessionContext sessionContext,
+                                          int nextPairCount,
+                                          List<ChatMessage> warmMessages) {
+        try {
+            int lastExtractedPairCount = redisSessionStore.getLastPersonaExtractedPairCount(sessionContext.sessionId());
+            PersonaExtractionService.ExtractionResult result = personaExtractionService.extractIfNeeded(
+                    sessionContext.userId(),
+                    sessionContext.sessionId(),
+                    nextPairCount,
+                    lastExtractedPairCount,
+                    warmMessages,
+                    storageProperties.getCompressionTokenThreshold(),
+                    storageProperties.getLlmContextWindow());
+            if (result.attempted()) {
+                redisSessionStore.markPersonaExtracted(sessionContext.sessionId(), nextPairCount);
+            }
+        } catch (Exception e) {
+            logger.warn("用户画像抽取失败，已跳过本轮: userId={}, sessionId={}, error={}",
+                    sessionContext.userId(), sessionContext.sessionId(), e.getMessage());
+        }
     }
 
     private int textLength(String text) {
