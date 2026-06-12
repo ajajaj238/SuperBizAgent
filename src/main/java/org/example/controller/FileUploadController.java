@@ -2,7 +2,7 @@ package org.example.controller;
 
 import org.example.config.FileUploadConfig;
 import org.example.dto.FileUploadRes;
-import org.example.service.VectorIndexService;
+import org.example.service.RagDocumentSyncService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,7 +29,7 @@ public class FileUploadController {
     private FileUploadConfig fileUploadConfig;
 
     @Autowired
-    private VectorIndexService vectorIndexService;
+    private RagDocumentSyncService ragDocumentSyncService;
 
     @PostMapping(value = "/api/upload", consumes = "multipart/form-data")
     public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file) {
@@ -70,9 +70,9 @@ public class FileUploadController {
 
             // 文件上传成功后，自动调用向量索引服务
             try {
-                logger.info("开始为上传文件创建向量索引: {}", filePath);
-                vectorIndexService.indexSingleFile(filePath.toString());
-                logger.info("向量索引创建成功: {}", filePath);
+                logger.info("开始为上传文件同步 RAG 向量索引: {}", filePath);
+                ragDocumentSyncService.syncSingleFile(filePath);
+                logger.info("RAG 向量索引同步成功: {}", filePath);
             } catch (Exception e) {
                 logger.error("向量索引创建失败: {}, 错误: {}", filePath, e.getMessage(), e);
                 // 注意：即使索引失败，文件上传仍然成功，只是记录错误日志

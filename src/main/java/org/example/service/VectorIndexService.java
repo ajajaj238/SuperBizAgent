@@ -121,7 +121,11 @@ public class VectorIndexService {
      * @param filePath 文件路径
      * @throws Exception 索引失败时抛出异常
      */
-    public void indexSingleFile(String filePath) throws Exception {
+    public IndexedDocument indexSingleFile(String filePath) throws Exception {
+        return indexSingleFile(filePath, null);
+    }
+
+    public IndexedDocument indexSingleFile(String filePath, String contentHash) throws Exception {
         Path path = Paths.get(filePath).normalize();
         File file = path.toFile();
         
@@ -136,7 +140,7 @@ public class VectorIndexService {
         logger.info("读取文件: {}, 内容长度: {} 字符", path, content.length());
 
         // 2. 删除该文件的旧数据（如果存在）
-        deleteExistingData(path.toString());
+        deleteDocumentVectors(path.toString());
 
         // 3. 文档分片
         List<DocumentChunk> chunks = chunkService.chunkDocument(content, path.toString());
@@ -151,7 +155,7 @@ public class VectorIndexService {
                 List<Float> vector = embeddingService.generateEmbedding(chunk.getContent());
 
                 // 构建元数据（包含文件信息）
-                Map<String, Object> metadata = buildMetadata(path.toString(), chunk, chunks.size());
+                Map<String, Object> metadata = buildMetadata(path.toString(), contentHash, chunk, chunks.size());
 
                 // 插入到 Milvus
                 insertToMilvus(chunk.getContent(), vector, metadata, chunk.getChunkIndex());
@@ -165,20 +169,20 @@ public class VectorIndexService {
         }
 
         logger.info("文件索引完成: {}, 共 {} 个分片", filePath, chunks.size());
+        return new IndexedDocument(normalizePath(path.toString()), contentHash, chunks.size());
     }
 
     /**
      * 删除文件的旧数据（根据 metadata._source）
      */
-    private void deleteExistingData(String filePath) {
+    public long deleteDocumentVectors(String filePath) {
         try {
             // 使用统一的路径分隔符（正斜杠）用于Milvus存储，避免表达式解析错误
             // 将系统路径转换为统一格式
-            Path path = Paths.get(filePath).normalize();
-            String normalizedPath = path.toString().replace(File.separator, "/");
+            String normalizedPath = normalizePath(filePath);
             
             // 构建删除表达式：metadata["_source"] == "xxx"
-            String expr = String.format("metadata[\"_source\"] == \"%s\"", normalizedPath);
+            String expr = String.format("metadata[\"_source\"] == \"%s\"", escapeMilvusString(normalizedPath));
             
             logger.info("准备删除旧数据，路径: {}, 表达式: {}", normalizedPath, expr);
 
@@ -192,7 +196,7 @@ public class VectorIndexService {
             // 状态码 65535 表示集合已经加载，这不是错误
             if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
                 logger.warn("加载 collection 失败: {}", loadResponse.getMessage());
-                return;
+                return 0;
             }
 
             DeleteParam deleteParam = DeleteParam.newBuilder()
@@ -204,25 +208,28 @@ public class VectorIndexService {
 
             if (response.getStatus() != 0) {
                 logger.warn("删除旧数据时出现警告: {}", response.getMessage());
+                return 0;
             } else {
                 long deletedCount = response.getData().getDeleteCnt();
                 logger.info("✓ 已删除文件的旧数据: {}, 删除记录数: {}", normalizedPath, deletedCount);
+                return deletedCount;
             }
 
         } catch (Exception e) {
             logger.warn("删除旧数据失败（可能是首次索引）: {}", e.getMessage());
+            return 0;
         }
     }
 
     /**
      * 构建元数据（包含文件信息）
      */
-    private Map<String, Object> buildMetadata(String filePath, DocumentChunk chunk, int totalChunks) {
+    private Map<String, Object> buildMetadata(String filePath, String contentHash, DocumentChunk chunk, int totalChunks) {
         Map<String, Object> metadata = new HashMap<>();
         
         // 标准化路径：使用统一的路径分隔符（正斜杠）用于存储，确保跨平台一致性
         Path path = Paths.get(filePath).normalize();
-        String normalizedPath = path.toString().replace(File.separator, "/");
+        String normalizedPath = normalizePath(path.toString());
         
         // 文件信息
         Path fileName = path.getFileName();
@@ -234,6 +241,10 @@ public class VectorIndexService {
         }
         
         metadata.put("_source", normalizedPath);
+        metadata.put("documentId", normalizedPath);
+        if (contentHash != null && !contentHash.isBlank()) {
+            metadata.put("contentHash", contentHash);
+        }
         metadata.put("_extension", extension);
         metadata.put("_file_name", fileNameStr);
         
@@ -306,6 +317,17 @@ public class VectorIndexService {
             logger.error("插入向量到 Milvus 失败", e);
             throw e;
         }
+    }
+
+    public String normalizePath(String filePath) {
+        return Paths.get(filePath).normalize().toString().replace(File.separator, "/");
+    }
+
+    private String escapeMilvusString(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    public record IndexedDocument(String documentId, String contentHash, int chunkCount) {
     }
 
     /**

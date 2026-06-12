@@ -110,6 +110,18 @@ rag:
     enabled: false  # 离线检索测评集总开关：开发/正常聊天建议关闭，需要评测 hit@k、MRR 时再打开
     log-no-labels: false  # 开启后，未命中测评样本的问题也会写评测日志；日志较多，调试时可改为 false
     dataset-location: classpath:retrieval-eval.json  # 可切换为其他离线测评集路径，例如 file:./eval/retrieval-eval.json
+  sync:
+    enabled: true  # RAG 知识库增量同步：新增/修改/删除文档后自动更新向量库
+    interval-ms: 60000
+    initial-delay-ms: 30000
+    index-file: ./data/rag-document-index.json
+    source-paths:
+      - ./aiops-docs
+      - ./uploads
+    allowed-extensions:
+      - md
+      - markdown
+      - txt
   rerank:
     enabled: true  # 是否启用检索结果重排
     candidate-top-k: 8  # 先召回候选数量，再重排截断到 rag.top-k
