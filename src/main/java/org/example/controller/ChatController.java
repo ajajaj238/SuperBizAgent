@@ -51,7 +51,7 @@ public class ChatController {
 
     @Autowired
     private AiOpsService aiOpsService;
-    
+
     @Autowired
     private ChatService chatService;
 
@@ -93,7 +93,7 @@ public class ChatController {
             // 获取或创建会话
             SessionContext session = getOrCreateSession(request.getId());
             tokenUsageRecorder.beginConversation(session.sessionId(), "/api/chat", request.getQuestion());
-            
+
             // 获取历史消息
             List<Map<String, String>> history = persistentSessionService.getRecentHistory(session);
             List<String> semanticMemories = persistentSessionService.getSemanticMemories(session, request.getQuestion());
@@ -126,13 +126,13 @@ public class ChatController {
             chatService.logAvailableTools();
 
             logger.info("开始 ReactAgent 对话（支持自动工具调用）");
-            
+
             // 构建系统提示词（包含历史消息）
             String systemPrompt = intentResult.getIntent() == UserIntent.AMBIGUOUS
                     ? chatService.buildSystemPrompt(history)
                     : chatService.buildIntentSystemPrompt(intentResult.getIntent());
             var monitoredChatModel = chatService.createMonitoredChatModel(chatModel, modelSpec);
-            
+
             // 创建 ReactAgent
             ToolFilter toolFilter = chatService.toolFilterForIntent(intentResult.getIntent());
             ReactAgent agent = chatService.createReactAgent(monitoredChatModel, systemPrompt, toolFilter);
@@ -151,14 +151,14 @@ public class ChatController {
             if (!personaPrompt.isBlank()) {
                 enrichedQuestion = personaPrompt + "\n" + enrichedQuestion;
             }
-            
+
             // 执行对话
             String fullAnswer = chatService.executeChat(agent, monitoredChatModel, systemPrompt, enrichedQuestion);
-            
+
             // 更新会话历史
             int pairCount = persistentSessionService.appendConversation(session, request.getQuestion(), fullAnswer, chatService);
             logger.info("已提交会话异步保存 - SessionId: {}, 估算消息对数: {}",
-                session.sessionId(), pairCount);
+                    session.sessionId(), pairCount);
             tokenUsageRecorder.completeConversationSuccess(fullAnswer.length());
 
             //打印历史记录
@@ -228,7 +228,7 @@ public class ChatController {
                 // 获取或创建会话
                 SessionContext session = getOrCreateSession(request.getId());
                 tokenUsageRecorder.beginConversation(session.sessionId(), "/api/chat_stream", request.getQuestion());
-                
+
                 // 获取历史消息
                 List<Map<String, String>> history = persistentSessionService.getRecentHistory(session);
                 List<String> semanticMemories = persistentSessionService.getSemanticMemories(session, request.getQuestion());
@@ -268,13 +268,13 @@ public class ChatController {
                 chatService.logAvailableTools();
 
                 logger.info("开始 ReactAgent 流式对话（支持自动工具调用）");
-                
+
                 // 构建系统提示词（包含历史消息）
                 String systemPrompt = intentResult.getIntent() == UserIntent.AMBIGUOUS
                         ? chatService.buildSystemPrompt(history)
                         : chatService.buildIntentSystemPrompt(intentResult.getIntent());
                 var monitoredChatModel = chatService.createMonitoredChatModel(chatModel, modelSpec);
-                
+
                 // 创建 ReactAgent
                 ToolFilter toolFilter = chatService.toolFilterForIntent(intentResult.getIntent());
                 ReactAgent agent = chatService.createReactAgent(monitoredChatModel, systemPrompt, toolFilter);
@@ -297,99 +297,99 @@ public class ChatController {
                 // 用于累积完整答案
                 StringBuilder fullAnswerBuilder = new StringBuilder();
                 AtomicBoolean contentStarted = new AtomicBoolean(false);
-                
+
                 // 使用 agent.stream() 进行流式对话
                 Flux<NodeOutput> stream = agent.stream(finalQuestion);
-                
+
                 stream.subscribe(
-                    output -> {
-                        try {
-                            // 检查是否为 StreamingOutput 类型
-                            if (output instanceof StreamingOutput streamingOutput) {
-                                OutputType type = streamingOutput.getOutputType();
-                                
-                                // 处理模型推理的流式输出
-                                if (type == OutputType.AGENT_MODEL_STREAMING) {
-                                    // 流式增量内容，逐步显示
-                                    String chunk = streamingOutput.message().getText();
-                                    if (chunk != null && !chunk.isEmpty()) {
-                                        contentStarted.set(true);
-                                        fullAnswerBuilder.append(chunk);
-                                        
-                                        // 实时发送到前端
-                                        emitter.send(SseEmitter.event()
-                                                .name("message")
-                                                .data(SseMessage.content(chunk), MediaType.APPLICATION_JSON));
-                                        
-                                        logger.info("发送流式内容: {}", chunk);
+                        output -> {
+                            try {
+                                // 检查是否为 StreamingOutput 类型
+                                if (output instanceof StreamingOutput streamingOutput) {
+                                    OutputType type = streamingOutput.getOutputType();
+
+                                    // 处理模型推理的流式输出
+                                    if (type == OutputType.AGENT_MODEL_STREAMING) {
+                                        // 流式增量内容，逐步显示
+                                        String chunk = streamingOutput.message().getText();
+                                        if (chunk != null && !chunk.isEmpty()) {
+                                            contentStarted.set(true);
+                                            fullAnswerBuilder.append(chunk);
+
+                                            // 实时发送到前端
+                                            emitter.send(SseEmitter.event()
+                                                    .name("message")
+                                                    .data(SseMessage.content(chunk), MediaType.APPLICATION_JSON));
+
+                                            logger.info("发送流式内容: {}", chunk);
+                                        }
+                                    } else if (type == OutputType.AGENT_MODEL_FINISHED) {
+                                        // 模型推理完成
+                                        logger.info("模型输出完成");
+                                    } else if (type == OutputType.AGENT_TOOL_FINISHED) {
+                                        // 工具调用完成
+                                        logger.info("工具调用完成: {}", output.node());
+                                    } else if (type == OutputType.AGENT_HOOK_FINISHED) {
+                                        // Hook 执行完成
+                                        logger.debug("Hook 执行完成: {}", output.node());
                                     }
-                                } else if (type == OutputType.AGENT_MODEL_FINISHED) {
-                                    // 模型推理完成
-                                    logger.info("模型输出完成");
-                                } else if (type == OutputType.AGENT_TOOL_FINISHED) {
-                                    // 工具调用完成
-                                    logger.info("工具调用完成: {}", output.node());
-                                } else if (type == OutputType.AGENT_HOOK_FINISHED) {
-                                    // Hook 执行完成
-                                    logger.debug("Hook 执行完成: {}", output.node());
                                 }
+                            } catch (IOException e) {
+                                logger.error("发送流式消息失败", e);
+                                throw new RuntimeException(e);
                             }
-                        } catch (IOException e) {
-                            logger.error("发送流式消息失败", e);
-                            throw new RuntimeException(e);
-                        }
-                    },
-                    error -> {
-                        // 错误处理
-                        logger.error("ReactAgent 流式对话失败", error);
-                        try {
-                            if (!contentStarted.get() && chatService.isToolExecutionFailure(error)) {
-                                logger.warn("流式工具调用失败，降级为无工具直接回答: {}", chatService.rootCauseMessage(error));
-                                String fallbackAnswer = chatService.answerWithoutTools(monitoredChatModel, systemPrompt, finalQuestion);
-                                fullAnswerBuilder.append(fallbackAnswer);
+                        },
+                        error -> {
+                            // 错误处理
+                            logger.error("ReactAgent 流式对话失败", error);
+                            try {
+                                if (!contentStarted.get() && chatService.isToolExecutionFailure(error)) {
+                                    logger.warn("流式工具调用失败，降级为无工具直接回答: {}", chatService.rootCauseMessage(error));
+                                    String fallbackAnswer = chatService.answerWithoutTools(monitoredChatModel, systemPrompt, finalQuestion);
+                                    fullAnswerBuilder.append(fallbackAnswer);
+                                    emitter.send(SseEmitter.event()
+                                            .name("message")
+                                            .data(SseMessage.content(fallbackAnswer), MediaType.APPLICATION_JSON));
+                                    tokenUsageRecorder.completeConversationSuccess(fallbackAnswer.length());
+                                    emitter.send(SseEmitter.event()
+                                            .name("message")
+                                            .data(SseMessage.done(), MediaType.APPLICATION_JSON));
+                                    emitter.complete();
+                                    return;
+                                }
+
+                                tokenUsageRecorder.completeConversationError(error.getMessage());
                                 emitter.send(SseEmitter.event()
                                         .name("message")
-                                        .data(SseMessage.content(fallbackAnswer), MediaType.APPLICATION_JSON));
-                                tokenUsageRecorder.completeConversationSuccess(fallbackAnswer.length());
+                                        .data(SseMessage.error(error.getMessage()), MediaType.APPLICATION_JSON));
+                            } catch (IOException ex) {
+                                logger.error("发送错误消息失败", ex);
+                            }
+                            emitter.completeWithError(error);
+                        },
+                        () -> {
+                            // 完成处理
+                            try {
+                                String fullAnswer = fullAnswerBuilder.toString();
+                                logger.info("ReactAgent 流式对话完成 - SessionId: {}, 答案长度: {}",
+                                        request.getId(), fullAnswer.length());
+
+                                // 更新会话历史
+                                int pairCount = persistentSessionService.appendConversation(session, request.getQuestion(), fullAnswer, chatService);
+                                logger.info("已提交会话异步保存 - SessionId: {}, 估算消息对数: {}",
+                                        session.sessionId(), pairCount);
+                                tokenUsageRecorder.completeConversationSuccess(fullAnswer.length());
+
+                                // 发送完成标记
                                 emitter.send(SseEmitter.event()
                                         .name("message")
                                         .data(SseMessage.done(), MediaType.APPLICATION_JSON));
                                 emitter.complete();
-                                return;
+                            } catch (IOException e) {
+                                logger.error("发送完成消息失败", e);
+                                emitter.completeWithError(e);
                             }
-
-                            tokenUsageRecorder.completeConversationError(error.getMessage());
-                            emitter.send(SseEmitter.event()
-                                    .name("message")
-                                    .data(SseMessage.error(error.getMessage()), MediaType.APPLICATION_JSON));
-                        } catch (IOException ex) {
-                            logger.error("发送错误消息失败", ex);
                         }
-                        emitter.completeWithError(error);
-                    },
-                    () -> {
-                        // 完成处理
-                        try {
-                            String fullAnswer = fullAnswerBuilder.toString();
-                            logger.info("ReactAgent 流式对话完成 - SessionId: {}, 答案长度: {}", 
-                                request.getId(), fullAnswer.length());
-                            
-                            // 更新会话历史
-                            int pairCount = persistentSessionService.appendConversation(session, request.getQuestion(), fullAnswer, chatService);
-                            logger.info("已提交会话异步保存 - SessionId: {}, 估算消息对数: {}",
-                                session.sessionId(), pairCount);
-                            tokenUsageRecorder.completeConversationSuccess(fullAnswer.length());
-                            
-                            // 发送完成标记
-                            emitter.send(SseEmitter.event()
-                                    .name("message")
-                                    .data(SseMessage.done(), MediaType.APPLICATION_JSON));
-                            emitter.complete();
-                        } catch (IOException e) {
-                            logger.error("发送完成消息失败", e);
-                            emitter.completeWithError(e);
-                        }
-                    }
                 );
 
             } catch (Exception e) {
@@ -432,7 +432,7 @@ public class ChatController {
                 ToolCallback[] toolCallbacks = chatService.getToolCallbacks();
 
                 emitter.send(SseEmitter.event().name("message").data(SseMessage.content("正在读取告警并拆解任务...\n")));
-                
+
                 // 调用 AiOpsService 执行分析流程
                 Optional<OverAllState> overAllStateOptional = aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks);
 
@@ -453,28 +453,28 @@ public class ChatController {
                 if (finalReportOptional.isPresent()) {
                     String finalReportText = finalReportOptional.get();
                     logger.info("提取到 Planner 最终报告，长度: {}", finalReportText.length());
-                    
+
                     // 发送分隔线
                     emitter.send(SseEmitter.event().name("message")
                             .data(SseMessage.content("\n\n" + "=".repeat(60) + "\n"), MediaType.APPLICATION_JSON));
-                    
+
                     // 发送完整的告警分析报告
                     emitter.send(SseEmitter.event().name("message")
                             .data(SseMessage.content("📋 **告警分析报告**\n\n"), MediaType.APPLICATION_JSON));
-                    
+
                     int chunkSize = 50;
                     for (int i = 0; i < finalReportText.length(); i += chunkSize) {
                         int end = Math.min(i + chunkSize, finalReportText.length());
                         String chunk = finalReportText.substring(i, end);
-                        
+
                         emitter.send(SseEmitter.event().name("message")
                                 .data(SseMessage.content(chunk), MediaType.APPLICATION_JSON));
                     }
-                    
+
                     // 发送结束分隔线
                     emitter.send(SseEmitter.event().name("message")
                             .data(SseMessage.content("\n" + "=".repeat(60) + "\n\n"), MediaType.APPLICATION_JSON));
-                    
+
                     logger.info("最终报告已完整输出");
                 } else {
                     logger.warn("未能提取到 Planner 最终报告");
@@ -693,7 +693,7 @@ public class ChatController {
         @com.fasterxml.jackson.annotation.JsonProperty(value = "Id")
         @com.fasterxml.jackson.annotation.JsonAlias({"id", "ID"})
         private String Id;
-        
+
         @com.fasterxml.jackson.annotation.JsonProperty(value = "Question")
         @com.fasterxml.jackson.annotation.JsonAlias({"question", "QUESTION"})
         private String Question;
