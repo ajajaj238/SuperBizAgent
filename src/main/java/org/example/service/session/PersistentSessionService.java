@@ -14,12 +14,17 @@ import org.slf4j.LoggerFactory;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.UUID;
 
 @Service
@@ -38,6 +43,14 @@ public class PersistentSessionService {
     private final ConversationMessageMapper conversationMessageMapper;
     private final PersonaExtractionService personaExtractionService;
     private final PasswordEncoder passwordEncoder;
+    private final TransactionTemplate transactionTemplate;
+    private final ExecutorService persistenceExecutor = new ThreadPoolExecutor(
+            2,
+            8,
+            60L,
+            TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(512),
+            new ThreadPoolExecutor.CallerRunsPolicy());
 
     public PersistentSessionService(UserAccountMapper userAccountMapper,
                                     SessionIndexMapper sessionIndexMapper,
@@ -47,7 +60,8 @@ public class PersistentSessionService {
                                     ChatService chatService,
                                     ConversationMessageMapper conversationMessageMapper,
                                     PersonaExtractionService personaExtractionService,
-                                    PasswordEncoder passwordEncoder) {
+                                    PasswordEncoder passwordEncoder,
+                                    TransactionTemplate transactionTemplate) {
         this.userAccountMapper = userAccountMapper;
         this.sessionIndexMapper = sessionIndexMapper;
         this.redisSessionStore = redisSessionStore;
@@ -57,6 +71,7 @@ public class PersistentSessionService {
         this.conversationMessageMapper = conversationMessageMapper;
         this.personaExtractionService = personaExtractionService;
         this.passwordEncoder = passwordEncoder;
+        this.transactionTemplate = transactionTemplate;
     }
 
     @Transactional
@@ -116,33 +131,77 @@ public class PersistentSessionService {
         }
     }
 
-    @Transactional
     public int appendConversation(SessionContext sessionContext, String userQuestion, String aiAnswer, ChatService chatService) {
-        // 写入 Redis（短期）+ JSON 归档
-        redisSessionStore.pushMessage(sessionContext.userId(), sessionContext.sessionId(), ChatMessage.user(userQuestion));
-        redisSessionStore.pushMessage(sessionContext.userId(), sessionContext.sessionId(), ChatMessage.assistant(aiAnswer));
-
-        // 写入 MySQL（长期持久化）
-        int currentIndex = conversationMessageMapper.getMaxIndex(sessionContext.sessionId());
         ChatMessage userMsg = ChatMessage.user(userQuestion);
-        userMsg.setMsgIndex(currentIndex + 1);
-        conversationMessageMapper.insert(sessionContext.sessionId(), userMsg, currentIndex + 1);
-
         ChatMessage assistantMsg = ChatMessage.assistant(aiAnswer);
-        assistantMsg.setMsgIndex(currentIndex + 2);
-        conversationMessageMapper.insert(sessionContext.sessionId(), assistantMsg, currentIndex + 2);
 
-        SessionIndex sessionIndex = sessionIndexMapper.findBySessionId(sessionContext.sessionId())
-                .orElseThrow(() -> new IllegalStateException("会话索引不存在: " + sessionContext.sessionId()));
-        int nextPairCount = Optional.ofNullable(sessionIndex.getMessageCount()).orElse(0) + 1;
-        sessionIndex.setMessageCount(nextPairCount);
-        if (sessionIndex.getTitle() == null || sessionIndex.getTitle().isBlank()) {
-            sessionIndex.setTitle(buildTitle(userQuestion));
-        }
-
+        // Redis 热消息同步写入，保证下一轮对话立刻能读到最近上下文。
+        redisSessionStore.pushMessage(sessionContext.userId(), sessionContext.sessionId(), userMsg);
+        redisSessionStore.pushMessage(sessionContext.userId(), sessionContext.sessionId(), assistantMsg);
         List<ChatMessage> warmMessages = redisSessionStore.getAllWarmMessages(
                 sessionContext.userId(), sessionContext.sessionId());
-        // 判断是否需要压缩
+
+        submitPersistenceTask(sessionContext, userQuestion, aiAnswer, userMsg, assistantMsg, warmMessages);
+        return Math.max(sessionContext.messagePairCount() + 1, Math.max(1, warmMessages.size() / 2));
+    }
+
+    private void submitPersistenceTask(SessionContext sessionContext,
+                                       String userQuestion,
+                                       String aiAnswer,
+                                       ChatMessage userMsg,
+                                       ChatMessage assistantMsg,
+                                       List<ChatMessage> warmMessages) {
+        persistenceExecutor.execute(() -> {
+            try {
+                synchronized (sessionContext.sessionId().intern()) {
+                    PersistedConversation persisted = persistConversationToDatabase(
+                            sessionContext, userQuestion, userMsg, assistantMsg);
+                    runAsyncPostProcessing(sessionContext, userQuestion, aiAnswer, warmMessages, persisted);
+                }
+            } catch (Exception e) {
+                logger.warn("异步保存会话失败: userId={}, sessionId={}, error={}",
+                        sessionContext.userId(), sessionContext.sessionId(), e.getMessage(), e);
+            }
+        });
+    }
+
+    private PersistedConversation persistConversationToDatabase(SessionContext sessionContext,
+                                                               String userQuestion,
+                                                               ChatMessage userMsg,
+                                                               ChatMessage assistantMsg) {
+        return transactionTemplate.execute(status -> {
+            int currentIndex = conversationMessageMapper.getMaxIndex(sessionContext.sessionId());
+            userMsg.setMsgIndex(currentIndex + 1);
+            conversationMessageMapper.insert(sessionContext.sessionId(), userMsg, currentIndex + 1);
+
+            assistantMsg.setMsgIndex(currentIndex + 2);
+            conversationMessageMapper.insert(sessionContext.sessionId(), assistantMsg, currentIndex + 2);
+
+            SessionIndex sessionIndex = sessionIndexMapper.findBySessionId(sessionContext.sessionId())
+                    .orElseThrow(() -> new IllegalStateException("会话索引不存在: " + sessionContext.sessionId()));
+            int nextPairCount = Optional.ofNullable(sessionIndex.getMessageCount()).orElse(0) + 1;
+            sessionIndex.setMessageCount(nextPairCount);
+            if (sessionIndex.getTitle() == null || sessionIndex.getTitle().isBlank()) {
+                sessionIndex.setTitle(buildTitle(userQuestion));
+            }
+            sessionIndexMapper.update(sessionIndex);
+            logger.info("会话异步落库完成: userId={}, sessionId={}, pairCount={}",
+                    sessionContext.userId(), sessionContext.sessionId(), nextPairCount);
+            return new PersistedConversation(sessionIndex, nextPairCount);
+        });
+    }
+
+    private void runAsyncPostProcessing(SessionContext sessionContext,
+                                        String userQuestion,
+                                        String aiAnswer,
+                                        List<ChatMessage> warmMessages,
+                                        PersistedConversation persisted) {
+        if (persisted == null || persisted.sessionIndex() == null) {
+            return;
+        }
+
+        int nextPairCount = persisted.nextPairCount();
+        SessionIndex sessionIndex = persisted.sessionIndex();
         CompressionDecision compressionDecision = shouldCompress(
                 sessionContext.sessionId(), nextPairCount, userQuestion, aiAnswer, warmMessages);
         if (compressionDecision.shouldCompress()) {
@@ -183,6 +242,7 @@ public class PersistentSessionService {
                     formatRatio(summaryTokens, compressionDecision.estimatedTokens()),
                     durationMs,
                     milvusStored);
+            transactionTemplate.executeWithoutResult(status -> sessionIndexMapper.update(sessionIndex));
             redisSessionStore.markCompressed(sessionContext.sessionId(), nextPairCount);
         } else {
             compressionLogger.debug(
@@ -199,8 +259,6 @@ public class PersistentSessionService {
         }
 
         triggerPersonaExtraction(sessionContext, nextPairCount, warmMessages);
-        sessionIndexMapper.update(sessionIndex);
-        return nextPairCount;
     }
 
     /**
@@ -254,6 +312,7 @@ public class PersistentSessionService {
     @PreDestroy
     public void compressAllOnShutdown() {
         try {
+            awaitPendingPersistenceTasks();
             List<Long> userIds = sessionIndexMapper.findDistinctUserIds();
             if (userIds.isEmpty()) {
                 logger.info("关闭前压缩：没有需要处理的用户");
@@ -468,6 +527,20 @@ public class PersistentSessionService {
         }
     }
 
+    private void awaitPendingPersistenceTasks() {
+        persistenceExecutor.shutdown();
+        try {
+            if (!persistenceExecutor.awaitTermination(20, TimeUnit.SECONDS)) {
+                List<Runnable> droppedTasks = persistenceExecutor.shutdownNow();
+                logger.warn("关闭前仍有 {} 个会话异步保存任务未完成", droppedTasks.size());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            List<Runnable> droppedTasks = persistenceExecutor.shutdownNow();
+            logger.warn("等待会话异步保存任务完成时被中断，未完成任务数: {}", droppedTasks.size());
+        }
+    }
+
     private int textLength(String text) {
         return text == null ? 0 : text.length();
     }
@@ -487,5 +560,8 @@ public class PersistentSessionService {
                                        int newMessageCount,
                                        int tokenThreshold,
                                        int redisThreshold) {
+    }
+
+    private record PersistedConversation(SessionIndex sessionIndex, int nextPairCount) {
     }
 }

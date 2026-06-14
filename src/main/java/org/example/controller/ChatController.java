@@ -112,7 +112,7 @@ public class ChatController {
                 String report = executeAiOpsReport();
                 int pairCount = persistentSessionService.appendConversation(session, request.getQuestion(), report, chatService);
                 tokenUsageRecorder.completeConversationSuccess(report.length());
-                logger.info("已更新持久化会话历史 - SessionId: {}, 当前消息对数: {}",
+                logger.info("已提交会话异步保存 - SessionId: {}, 估算消息对数: {}",
                         session.sessionId(), pairCount);
                 return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(report)));
             }
@@ -157,7 +157,7 @@ public class ChatController {
             
             // 更新会话历史
             int pairCount = persistentSessionService.appendConversation(session, request.getQuestion(), fullAnswer, chatService);
-            logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}", 
+            logger.info("已提交会话异步保存 - SessionId: {}, 估算消息对数: {}",
                 session.sessionId(), pairCount);
             tokenUsageRecorder.completeConversationSuccess(fullAnswer.length());
 
@@ -376,7 +376,7 @@ public class ChatController {
                             
                             // 更新会话历史
                             int pairCount = persistentSessionService.appendConversation(session, request.getQuestion(), fullAnswer, chatService);
-                            logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}", 
+                            logger.info("已提交会话异步保存 - SessionId: {}, 估算消息对数: {}",
                                 session.sessionId(), pairCount);
                             tokenUsageRecorder.completeConversationSuccess(fullAnswer.length());
                             
