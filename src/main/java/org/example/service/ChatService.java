@@ -51,7 +51,9 @@ public class ChatService {
             - 只回答用户当前问题，不要解释系统内部处理过程。
             - 不要提到“闲聊模式”“知识库模式”“意图识别”“用户画像”“RAG”“检索结果”“工具选择”等内部术语。
             - 用户画像、历史对话、知识库参考只作为静默参考；不要说“根据你的画像”“根据内部知识库参考”等。
-            - 如果用户问“我是谁”且没有可靠身份信息，就直接说暂时还不知道，不要编造。
+            - 如果用户问“我是谁”，只能依据明确的姓名、职业、角色、职责等身份信息回答。
+            - 语言偏好、回答详细程度、常用工具、交流习惯不属于身份信息，禁止据此回答“你是使用中文的用户”这类内容。
+            - 如果没有可靠身份信息，就直接说“我暂时还不知道你的具体身份。”不要编造。
             """;
 
     @Autowired
@@ -80,6 +82,9 @@ public class ChatService {
 
     @Autowired
     private TokenUsageRecorder tokenUsageRecorder;
+
+    @Autowired
+    private ModelRoutingService modelRoutingService;
 
     @Autowired
     private PromptSecurityService promptSecurityService;
@@ -112,15 +117,29 @@ public class ChatService {
      * @param topP 核采样参数
      */
     public DashScopeChatModel createChatModel(DashScopeApi dashScopeApi, double temperature, int maxToken, double topP) {
+        ModelRoutingService.ModelSpec balancedSpec =
+                modelRoutingService.forTask(ModelRoutingService.ModelTask.DEFAULT_CHAT);
         return DashScopeChatModel.builder()
                 .dashScopeApi(dashScopeApi)
                 .defaultOptions(DashScopeChatOptions.builder()
-                        .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
+                        .withModel(balancedSpec.modelName())
                         .withTemperature(temperature)
                         .withMaxToken(maxToken)
                         .withTopP(topP)
                         .build())
                 .build();
+    }
+
+    public DashScopeChatModel createChatModel(DashScopeApi dashScopeApi, ModelRoutingService.ModelSpec modelSpec) {
+        return modelRoutingService.createChatModel(dashScopeApi, modelSpec);
+    }
+
+    public DashScopeChatModel createChatModelForIntent(DashScopeApi dashScopeApi, UserIntent intent) {
+        return createChatModel(dashScopeApi, modelRoutingService.forIntent(intent));
+    }
+
+    public DashScopeChatModel createChatModelForTask(DashScopeApi dashScopeApi, ModelRoutingService.ModelTask task) {
+        return createChatModel(dashScopeApi, modelRoutingService.forTask(task));
     }
 
     /**
@@ -131,7 +150,25 @@ public class ChatService {
     }
 
     public ChatModel createMonitoredChatModel(DashScopeChatModel chatModel) {
-        return new MonitoringChatModel(chatModel, tokenUsageRecorder, DashScopeChatModel.DEFAULT_MODEL_NAME);
+        return new MonitoringChatModel(
+                chatModel,
+                tokenUsageRecorder,
+                modelRoutingService.forTask(ModelRoutingService.ModelTask.DEFAULT_CHAT).modelName());
+    }
+
+    public ChatModel createMonitoredChatModel(DashScopeChatModel chatModel, ModelRoutingService.ModelSpec modelSpec) {
+        String modelName = modelSpec == null
+                ? modelRoutingService.forTask(ModelRoutingService.ModelTask.DEFAULT_CHAT).modelName()
+                : modelSpec.modelName();
+        return new MonitoringChatModel(chatModel, tokenUsageRecorder, modelName);
+    }
+
+    public ModelRoutingService.ModelSpec modelSpecForIntent(UserIntent intent) {
+        return modelRoutingService.forIntent(intent);
+    }
+
+    public ModelRoutingService.ModelSpec modelSpecForTask(ModelRoutingService.ModelTask task) {
+        return modelRoutingService.forTask(task);
     }
 
     /**
@@ -670,7 +707,14 @@ public class ChatService {
 
     private String summarizeConversationMemoryWithLlm(String previousSummary, List<Map<String, String>> history) {
         DashScopeApi dashScopeApi = createDashScopeApi();
-        DashScopeChatModel summaryModel = createChatModel(dashScopeApi, 0.2, memorySummaryMaxToken, 0.8);
+        ModelRoutingService.ModelSpec summarySpec = modelSpecForTask(ModelRoutingService.ModelTask.MEMORY_SUMMARY);
+        summarySpec = new ModelRoutingService.ModelSpec(
+                summarySpec.tier(),
+                summarySpec.modelName(),
+                0.2,
+                memorySummaryMaxToken,
+                0.8);
+        DashScopeChatModel summaryModel = createChatModel(dashScopeApi, summarySpec);
 
         String historyText = buildConversationHistoryText(history);
         String safePreviousSummary = sanitizeMemoryText(

@@ -2,13 +2,13 @@ package org.example.service.session;
 
 import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.entity.UserPersona;
 import org.example.monitor.MonitoringChatModel;
 import org.example.monitor.TokenEstimator;
 import org.example.monitor.TokenUsageRecorder;
+import org.example.service.ModelRoutingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -63,6 +63,7 @@ public class PersonaExtractionService {
     private final ObjectMapper objectMapper;
     private final PersonaService personaService;
     private final TokenUsageRecorder tokenUsageRecorder;
+    private final ModelRoutingService modelRoutingService;
 
     @Value("${persona.extraction.enabled:true}")
     private boolean enabled;
@@ -87,10 +88,12 @@ public class PersonaExtractionService {
 
     public PersonaExtractionService(ObjectMapper objectMapper,
                                     PersonaService personaService,
-                                    TokenUsageRecorder tokenUsageRecorder) {
+                                    TokenUsageRecorder tokenUsageRecorder,
+                                    ModelRoutingService modelRoutingService) {
         this.objectMapper = objectMapper;
         this.personaService = personaService;
         this.tokenUsageRecorder = tokenUsageRecorder;
+        this.modelRoutingService = modelRoutingService;
     }
 
     public ExtractionResult extractIfNeeded(Long userId,
@@ -172,7 +175,7 @@ public class PersonaExtractionService {
 
     private JsonNode extractWithLlm(Long userId, String sessionId, List<ChatMessage> messages) throws Exception {
         ChatModel model = new MonitoringChatModel(createExtractionModel(), tokenUsageRecorder,
-                DashScopeChatModel.DEFAULT_MODEL_NAME);
+                modelRoutingService.forTask(ModelRoutingService.ModelTask.PERSONA_EXTRACTION).modelName());
         ChatResponse response = model.call(new Prompt(List.of(
                 new SystemMessage(SYSTEM_PROMPT),
                 new UserMessage("最近对话：\n" + buildMessagesText(messages))
@@ -202,15 +205,10 @@ public class PersonaExtractionService {
         DashScopeApi dashScopeApi = DashScopeApi.builder()
                 .apiKey(dashScopeApiKey)
                 .build();
-        return DashScopeChatModel.builder()
-                .dashScopeApi(dashScopeApi)
-                .defaultOptions(DashScopeChatOptions.builder()
-                        .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
-                        .withTemperature(0.1)
-                        .withMaxToken(512)
-                        .withTopP(0.5)
-                        .build())
-                .build();
+        ModelRoutingService.ModelSpec spec =
+                modelRoutingService.forTask(ModelRoutingService.ModelTask.PERSONA_EXTRACTION);
+        spec = new ModelRoutingService.ModelSpec(spec.tier(), spec.modelName(), 0.1, 512, 0.5);
+        return modelRoutingService.createChatModel(dashScopeApi, spec);
     }
 
     private JsonNode extractByRules(List<ChatMessage> messages) {

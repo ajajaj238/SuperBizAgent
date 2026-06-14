@@ -2,7 +2,6 @@ package org.example.controller;
 
 import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
@@ -13,6 +12,7 @@ import lombok.Setter;
 import org.example.monitor.TokenUsageRecorder;
 import org.example.service.AiOpsService;
 import org.example.service.ChatService;
+import org.example.service.ModelRoutingService;
 import org.example.config.UserContext;
 import org.example.entity.SessionIndex;
 import org.example.service.intent.HybridIntentClassifier;
@@ -119,11 +119,8 @@ public class ChatController {
 
             // 创建 DashScope API 和 ChatModel
             DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-            DashScopeChatModel chatModel = chatService.createChatModel(
-                    dashScopeApi,
-                    chatService.temperatureForIntent(intentResult.getIntent()),
-                    2000,
-                    0.9);
+            ModelRoutingService.ModelSpec modelSpec = chatService.modelSpecForIntent(intentResult.getIntent());
+            DashScopeChatModel chatModel = chatService.createChatModel(dashScopeApi, modelSpec);
 
             // 记录可用工具
             chatService.logAvailableTools();
@@ -134,7 +131,7 @@ public class ChatController {
             String systemPrompt = intentResult.getIntent() == UserIntent.AMBIGUOUS
                     ? chatService.buildSystemPrompt(history)
                     : chatService.buildIntentSystemPrompt(intentResult.getIntent());
-            var monitoredChatModel = chatService.createMonitoredChatModel(chatModel);
+            var monitoredChatModel = chatService.createMonitoredChatModel(chatModel, modelSpec);
             
             // 创建 ReactAgent
             ToolFilter toolFilter = chatService.toolFilterForIntent(intentResult.getIntent());
@@ -209,6 +206,7 @@ public class ChatController {
     @PostMapping(value = "/chat_stream", produces = "text/event-stream;charset=UTF-8")
     public SseEmitter chatStream(@RequestBody ChatRequest request) {
         SseEmitter emitter = new SseEmitter(300000L); // 5分钟超时
+        UserContext.UserInfo userInfo = UserContext.current();
 
         // 参数校验
         if (request.getQuestion() == null || request.getQuestion().trim().isEmpty()) {
@@ -224,6 +222,7 @@ public class ChatController {
 
         executor.execute(() -> {
             try {
+                UserContext.set(userInfo);
                 logger.info("收到 ReactAgent 对话请求 - SessionId: {}, Question: {}", request.getId(), request.getQuestion());
 
                 // 获取或创建会话
@@ -262,11 +261,8 @@ public class ChatController {
 
                 // 创建 DashScope API 和 ChatModel
                 DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = chatService.createChatModel(
-                        dashScopeApi,
-                        chatService.temperatureForIntent(intentResult.getIntent()),
-                        2000,
-                        0.9);
+                ModelRoutingService.ModelSpec modelSpec = chatService.modelSpecForIntent(intentResult.getIntent());
+                DashScopeChatModel chatModel = chatService.createChatModel(dashScopeApi, modelSpec);
 
                 // 记录可用工具
                 chatService.logAvailableTools();
@@ -277,7 +273,7 @@ public class ChatController {
                 String systemPrompt = intentResult.getIntent() == UserIntent.AMBIGUOUS
                         ? chatService.buildSystemPrompt(history)
                         : chatService.buildIntentSystemPrompt(intentResult.getIntent());
-                var monitoredChatModel = chatService.createMonitoredChatModel(chatModel);
+                var monitoredChatModel = chatService.createMonitoredChatModel(chatModel, modelSpec);
                 
                 // 创建 ReactAgent
                 ToolFilter toolFilter = chatService.toolFilterForIntent(intentResult.getIntent());
@@ -407,6 +403,8 @@ public class ChatController {
                     logger.error("发送错误消息失败", ex);
                 }
                 emitter.completeWithError(e);
+            } finally {
+                UserContext.clear();
             }
         });
 
@@ -420,21 +418,16 @@ public class ChatController {
     @PostMapping(value = "/ai_ops", produces = "text/event-stream;charset=UTF-8")
     public SseEmitter aiOps() {
         SseEmitter emitter = new SseEmitter(600000L); // 10分钟超时（告警分析可能较慢）
+        UserContext.UserInfo userInfo = UserContext.current();
 
         executor.execute(() -> {
             try {
+                UserContext.set(userInfo);
                 logger.info("收到 AI 智能运维请求 - 启动多 Agent 协作流程");
 
                 DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = DashScopeChatModel.builder()
-                        .dashScopeApi(dashScopeApi)
-                        .defaultOptions(DashScopeChatOptions.builder()
-                                .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
-                                .withTemperature(0.3)
-                                .withMaxToken(8000)
-                                .withTopP(0.9)
-                                .build())
-                        .build();
+                DashScopeChatModel chatModel = chatService.createChatModelForTask(
+                        dashScopeApi, ModelRoutingService.ModelTask.AIOPS_REPORT);
 
                 ToolCallback[] toolCallbacks = chatService.getToolCallbacks();
 
@@ -502,6 +495,8 @@ public class ChatController {
                     logger.error("发送错误消息失败", ex);
                 }
                 emitter.completeWithError(e);
+            } finally {
+                UserContext.clear();
             }
         });
 
@@ -630,15 +625,8 @@ public class ChatController {
 
     private String executeAiOpsReport() throws Exception {
         DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-        DashScopeChatModel chatModel = DashScopeChatModel.builder()
-                .dashScopeApi(dashScopeApi)
-                .defaultOptions(DashScopeChatOptions.builder()
-                        .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
-                        .withTemperature(0.3)
-                        .withMaxToken(8000)
-                        .withTopP(0.9)
-                        .build())
-                .build();
+        DashScopeChatModel chatModel = chatService.createChatModelForTask(
+                dashScopeApi, ModelRoutingService.ModelTask.AIOPS_REPORT);
 
         Optional<OverAllState> state = aiOpsService.executeAiOpsAnalysis(chatModel, chatService.getToolCallbacks());
         if (state.isEmpty()) {
@@ -650,15 +638,8 @@ public class ChatController {
 
     private void streamAiOpsReport(SseEmitter emitter) throws Exception {
         DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-        DashScopeChatModel chatModel = DashScopeChatModel.builder()
-                .dashScopeApi(dashScopeApi)
-                .defaultOptions(DashScopeChatOptions.builder()
-                        .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
-                        .withTemperature(0.3)
-                        .withMaxToken(8000)
-                        .withTopP(0.9)
-                        .build())
-                .build();
+        DashScopeChatModel chatModel = chatService.createChatModelForTask(
+                dashScopeApi, ModelRoutingService.ModelTask.AIOPS_REPORT);
 
         emitter.send(SseEmitter.event().name("message")
                 .data(SseMessage.content("正在读取告警并拆解任务...\n"), MediaType.APPLICATION_JSON));

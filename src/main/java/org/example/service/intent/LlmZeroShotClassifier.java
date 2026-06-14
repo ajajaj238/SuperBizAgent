@@ -3,6 +3,7 @@ package org.example.service.intent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.service.ChatService;
+import org.example.service.ModelRoutingService;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,7 +59,10 @@ public class LlmZeroShotClassifier implements IntentClassifier {
     public IntentResult classify(String userInput, List<Map<String, String>> history) {
         try {
             ChatModel model = chatService.createMonitoredChatModel(
-                    chatService.createChatModel(chatService.createDashScopeApi(), 0.1, 256, 0.5));
+                    chatService.createChatModelForTask(
+                            chatService.createDashScopeApi(),
+                            ModelRoutingService.ModelTask.INTENT_CLASSIFICATION),
+                    chatService.modelSpecForTask(ModelRoutingService.ModelTask.INTENT_CLASSIFICATION));
             ChatResponse response = model.call(new Prompt(List.of(
                     new SystemMessage(SYSTEM_PROMPT),
                     new UserMessage(buildFewShotPrompt(userInput))

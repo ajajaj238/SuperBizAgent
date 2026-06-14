@@ -27,6 +27,18 @@ public class UserContext {
         return info != null ? info.role() : null;
     }
 
+    public static UserInfo current() {
+        return CONTEXT.get();
+    }
+
+    public static void set(UserInfo info) {
+        if (info == null) {
+            clear();
+            return;
+        }
+        CONTEXT.set(info);
+    }
+
     public static void clear() {
         CONTEXT.remove();
     }

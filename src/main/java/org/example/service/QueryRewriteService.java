@@ -2,7 +2,6 @@ package org.example.service;
 
 import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.monitor.MonitoringChatModel;
@@ -50,10 +49,14 @@ public class QueryRewriteService {
 
     private final ObjectMapper objectMapper;
     private final TokenUsageRecorder tokenUsageRecorder;
+    private final ModelRoutingService modelRoutingService;
 
-    public QueryRewriteService(ObjectMapper objectMapper, TokenUsageRecorder tokenUsageRecorder) {
+    public QueryRewriteService(ObjectMapper objectMapper,
+                               TokenUsageRecorder tokenUsageRecorder,
+                               ModelRoutingService modelRoutingService) {
         this.objectMapper = objectMapper;
         this.tokenUsageRecorder = tokenUsageRecorder;
+        this.modelRoutingService = modelRoutingService;
     }
 
     @Value("${rag.query-rewrite.enabled:true}")
@@ -113,7 +116,7 @@ public class QueryRewriteService {
         }
         try {
             ChatModel model = new MonitoringChatModel(createRewriteModel(), tokenUsageRecorder,
-                    DashScopeChatModel.DEFAULT_MODEL_NAME);
+                    modelRoutingService.forTask(ModelRoutingService.ModelTask.QUERY_REWRITE).modelName());
             ChatResponse response = model.call(new Prompt(List.of(
                     new SystemMessage(SYSTEM_PROMPT),
                     new UserMessage(buildRewritePrompt(question, history))
@@ -139,15 +142,14 @@ public class QueryRewriteService {
         DashScopeApi dashScopeApi = DashScopeApi.builder()
                 .apiKey(dashScopeApiKey)
                 .build();
-        return DashScopeChatModel.builder()
-                .dashScopeApi(dashScopeApi)
-                .defaultOptions(DashScopeChatOptions.builder()
-                        .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
-                        .withTemperature(0.1)
-                        .withMaxToken(positiveOrDefault(llmMaxToken, 256))
-                        .withTopP(0.5)
-                        .build())
-                .build();
+        ModelRoutingService.ModelSpec spec = modelRoutingService.forTask(ModelRoutingService.ModelTask.QUERY_REWRITE);
+        spec = new ModelRoutingService.ModelSpec(
+                spec.tier(),
+                spec.modelName(),
+                0.1,
+                positiveOrDefault(llmMaxToken, 256),
+                0.5);
+        return modelRoutingService.createChatModel(dashScopeApi, spec);
     }
 
     private String buildRewritePrompt(String question, List<Map<String, String>> history) {

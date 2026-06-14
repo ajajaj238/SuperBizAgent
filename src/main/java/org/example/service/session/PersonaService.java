@@ -113,11 +113,15 @@ public class PersonaService {
             return "";
         }
 
+        var personaData = persona.getPersona();
+        if (!hasUsefulPersona(persona)) {
+            return "";
+        }
+
         StringBuilder sb = new StringBuilder();
         sb.append("\n【用户画像，仅供静默参考】\n");
-        sb.append("请只用这些信息调整回答风格和必要上下文，不要在回答中提到“用户画像”或显式复述画像来源。\n");
+        sb.append("请只用这些信息调整回答风格和必要上下文，不要在回答中提到“用户画像”或显式复述画像来源。偏好信息不代表用户身份。\n");
 
-        var personaData = persona.getPersona();
         if (personaData.getOccupationRole() != null && !personaData.getOccupationRole().isEmpty()) {
             sb.append("角色: ");
             personaData.getOccupationRole().forEach(r -> sb.append(r.getValue()).append(" "));
@@ -131,10 +135,22 @@ public class PersonaService {
         }
         if (personaData.getPreferences() != null) {
             var pref = personaData.getPreferences();
-            sb.append("偏好: ")
-                    .append("语言=").append(pref.getPreferredLanguage())
-                    .append(", 详细程度=").append(pref.getResponseVerbosity())
-                    .append("\n");
+            if (hasNonDefaultPreferences(pref)) {
+                sb.append("回答偏好（不是身份）: ");
+                List<String> preferences = new ArrayList<>();
+                if (pref.getPreferredLanguage() != null && !pref.getPreferredLanguage().isBlank()
+                        && !"zh-CN".equalsIgnoreCase(pref.getPreferredLanguage())) {
+                    preferences.add("语言=" + pref.getPreferredLanguage());
+                }
+                if (pref.getResponseVerbosity() != null && !pref.getResponseVerbosity().isBlank()
+                        && !"normal".equalsIgnoreCase(pref.getResponseVerbosity())) {
+                    preferences.add("详细程度=" + pref.getResponseVerbosity());
+                }
+                if (pref.getFavoriteTools() != null && !pref.getFavoriteTools().isEmpty()) {
+                    preferences.add("常用工具=" + String.join(" ", pref.getFavoriteTools()));
+                }
+                sb.append(String.join(", ", preferences)).append("\n");
+            }
         }
 
         return sb.toString();
@@ -178,6 +194,41 @@ public class PersonaService {
         provenance.setDataSources(List.of("default"));
         persona.setProvenance(provenance);
         return persona;
+    }
+
+    private boolean hasUsefulPersona(UserPersona persona) {
+        UserPersona.Persona data = persona.getPersona();
+        if (data == null) {
+            return false;
+        }
+        if (data.getOccupationRole() != null && !data.getOccupationRole().isEmpty()) {
+            return true;
+        }
+        if (data.getExpertiseDomains() != null && !data.getExpertiseDomains().isEmpty()) {
+            return true;
+        }
+        if (data.getFrequentActions() != null && !data.getFrequentActions().isEmpty()) {
+            return true;
+        }
+        if (persona.getInferredFacts() != null && !persona.getInferredFacts().isEmpty()) {
+            return true;
+        }
+        return hasNonDefaultPreferences(data.getPreferences());
+    }
+
+    private boolean hasNonDefaultPreferences(UserPersona.Preferences preferences) {
+        if (preferences == null) {
+            return false;
+        }
+        boolean hasLanguage = preferences.getPreferredLanguage() != null
+                && !preferences.getPreferredLanguage().isBlank()
+                && !"zh-CN".equalsIgnoreCase(preferences.getPreferredLanguage());
+        boolean hasVerbosity = preferences.getResponseVerbosity() != null
+                && !preferences.getResponseVerbosity().isBlank()
+                && !"normal".equalsIgnoreCase(preferences.getResponseVerbosity());
+        boolean hasFavoriteTools = preferences.getFavoriteTools() != null
+                && !preferences.getFavoriteTools().isEmpty();
+        return hasLanguage || hasVerbosity || hasFavoriteTools;
     }
 
     private void normalizeBeforeSave(Long userId, UserPersona persona) {

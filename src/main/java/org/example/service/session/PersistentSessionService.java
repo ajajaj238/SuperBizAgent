@@ -11,6 +11,7 @@ import org.example.monitor.TokenEstimator;
 import org.example.service.ChatService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -36,6 +37,7 @@ public class PersistentSessionService {
     private final ChatService chatService;
     private final ConversationMessageMapper conversationMessageMapper;
     private final PersonaExtractionService personaExtractionService;
+    private final PasswordEncoder passwordEncoder;
 
     public PersistentSessionService(UserAccountMapper userAccountMapper,
                                     SessionIndexMapper sessionIndexMapper,
@@ -44,7 +46,8 @@ public class PersistentSessionService {
                                     SessionStorageProperties storageProperties,
                                     ChatService chatService,
                                     ConversationMessageMapper conversationMessageMapper,
-                                    PersonaExtractionService personaExtractionService) {
+                                    PersonaExtractionService personaExtractionService,
+                                    PasswordEncoder passwordEncoder) {
         this.userAccountMapper = userAccountMapper;
         this.sessionIndexMapper = sessionIndexMapper;
         this.redisSessionStore = redisSessionStore;
@@ -53,6 +56,7 @@ public class PersistentSessionService {
         this.chatService = chatService;
         this.conversationMessageMapper = conversationMessageMapper;
         this.personaExtractionService = personaExtractionService;
+        this.passwordEncoder = passwordEncoder;
     }
 
     @Transactional
@@ -341,7 +345,10 @@ public class PersistentSessionService {
                 .orElseGet(() -> {
                     UserAccount user = new UserAccount();
                     user.setUsername(username);
+                    user.setPasswordHash(passwordEncoder.encode("AUTO_CREATED_USER_" + UUID.randomUUID()));
                     user.setDisplayName(username);
+                    user.setRole("user");
+                    user.setStatus(1);
                     userAccountMapper.insert(user);
                     return user;
                 });

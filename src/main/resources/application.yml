@@ -90,6 +90,39 @@ dashscope:
   embedding:
     model: text-embedding-v4  # 阿里云文本向量化模型
 
+ai:
+  model-routing:
+    fast-model: qwen-turbo
+    balanced-model: qwen-plus
+    reasoning-model: qwen-plus
+    fast:
+      temperature: 0.2
+      max-token: 512
+      top-p: 0.7
+    balanced:
+      temperature: 0.5
+      max-token: 2000
+      top-p: 0.9
+    reasoning:
+      temperature: 0.3
+      max-token: 8000
+      top-p: 0.8
+    intent:
+      chitchat: fast
+      time-query: fast
+      system-operation: fast
+      knowledge-qa: balanced
+      log-query: balanced
+      metrics-query: balanced
+      ambiguous: balanced
+      alert-diagnosis: reasoning
+    task:
+      intent-classification: fast
+      query-rewrite: fast
+      persona-extraction: fast
+      memory-summary: balanced
+      aiops-report: reasoning
+
 # 文档分片配置
 document:
   chunk:
