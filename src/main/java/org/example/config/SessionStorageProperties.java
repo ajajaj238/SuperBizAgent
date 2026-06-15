@@ -12,11 +12,10 @@ import java.time.Duration;
 public class SessionStorageProperties {
 
     private Duration redisTtl = Duration.ofHours(24);
-    private int redisMaxMessages = 50;
-    private int compressionInterval = 5;
-    private int compressionTokenThreshold = 3000;
-    private int compressionMinMessages = 6;
-    private double compressionRedisUsageRatio = 0.8;
+    private int redisMaxMessages = 20;
+    private int compressionInterval = 0;
+    private int compressionTokenThreshold = 2000;
+    private int compressionMinMessages = 2;
     private int llmContextWindow = 10;
     private int semanticTopK = 3;
     private int dbPageSize = 20;
@@ -40,10 +39,6 @@ public class SessionStorageProperties {
 
     public void setCompressionMinMessages(int compressionMinMessages) {
         this.compressionMinMessages = compressionMinMessages;
-    }
-
-    public void setCompressionRedisUsageRatio(double compressionRedisUsageRatio) {
-        this.compressionRedisUsageRatio = compressionRedisUsageRatio;
     }
 
     public void setLlmContextWindow(int llmContextWindow) {

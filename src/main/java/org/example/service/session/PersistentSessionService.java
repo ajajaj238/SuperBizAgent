@@ -18,11 +18,14 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.UUID;
@@ -44,13 +47,21 @@ public class PersistentSessionService {
     private final PersonaExtractionService personaExtractionService;
     private final PasswordEncoder passwordEncoder;
     private final TransactionTemplate transactionTemplate;
+    private final Set<String> compressingSessions = ConcurrentHashMap.newKeySet();
     private final ExecutorService persistenceExecutor = new ThreadPoolExecutor(
-            2,
-            8,
+            30,
+            40,
             60L,
             TimeUnit.SECONDS,
-            new LinkedBlockingQueue<>(512),
+            new LinkedBlockingQueue<>(100),
             new ThreadPoolExecutor.CallerRunsPolicy());
+    private final ExecutorService compressionExecutor = new ThreadPoolExecutor(
+            2,
+            4,
+            60L,
+            TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(100),
+            new ThreadPoolExecutor.AbortPolicy());
 
     public PersistentSessionService(UserAccountMapper userAccountMapper,
                                     SessionIndexMapper sessionIndexMapper,
@@ -134,6 +145,10 @@ public class PersistentSessionService {
     public int appendConversation(SessionContext sessionContext, String userQuestion, String aiAnswer, ChatService chatService) {
         ChatMessage userMsg = ChatMessage.user(userQuestion);
         ChatMessage assistantMsg = ChatMessage.assistant(aiAnswer);
+        List<ChatMessage> compressionMessages = new ArrayList<>(redisSessionStore.getAllWarmMessages(
+                sessionContext.userId(), sessionContext.sessionId()));
+        compressionMessages.add(userMsg);
+        compressionMessages.add(assistantMsg);
 
         // Redis 热消息同步写入，保证下一轮对话立刻能读到最近上下文。
         redisSessionStore.pushMessage(sessionContext.userId(), sessionContext.sessionId(), userMsg);
@@ -141,7 +156,7 @@ public class PersistentSessionService {
         List<ChatMessage> warmMessages = redisSessionStore.getAllWarmMessages(
                 sessionContext.userId(), sessionContext.sessionId());
 
-        submitPersistenceTask(sessionContext, userQuestion, aiAnswer, userMsg, assistantMsg, warmMessages);
+        submitPersistenceTask(sessionContext, userQuestion, aiAnswer, userMsg, assistantMsg, warmMessages, compressionMessages);
         return Math.max(sessionContext.messagePairCount() + 1, Math.max(1, warmMessages.size() / 2));
     }
 
@@ -150,13 +165,14 @@ public class PersistentSessionService {
                                        String aiAnswer,
                                        ChatMessage userMsg,
                                        ChatMessage assistantMsg,
-                                       List<ChatMessage> warmMessages) {
+                                       List<ChatMessage> warmMessages,
+                                       List<ChatMessage> compressionMessages) {
         persistenceExecutor.execute(() -> {
             try {
                 synchronized (sessionContext.sessionId().intern()) {
                     PersistedConversation persisted = persistConversationToDatabase(
                             sessionContext, userQuestion, userMsg, assistantMsg);
-                    runAsyncPostProcessing(sessionContext, userQuestion, aiAnswer, warmMessages, persisted);
+                    submitPostProcessingTask(sessionContext, userQuestion, aiAnswer, warmMessages, compressionMessages, persisted);
                 }
             } catch (Exception e) {
                 logger.warn("异步保存会话失败: userId={}, sessionId={}, error={}",
@@ -165,25 +181,43 @@ public class PersistentSessionService {
         });
     }
 
+    private void submitPostProcessingTask(SessionContext sessionContext,
+                                          String userQuestion,
+                                          String aiAnswer,
+                                          List<ChatMessage> warmMessages,
+                                          List<ChatMessage> compressionMessages,
+                                          PersistedConversation persisted) {
+        try {
+            compressionExecutor.execute(() -> runAsyncPostProcessing(
+                    sessionContext, userQuestion, aiAnswer, warmMessages, compressionMessages, persisted));
+        } catch (RejectedExecutionException e) {
+            logger.warn("会话压缩异步任务队列已满，跳过本轮后处理: userId={}, sessionId={}",
+                    sessionContext.userId(), sessionContext.sessionId());
+        }
+    }
+
     private PersistedConversation persistConversationToDatabase(SessionContext sessionContext,
                                                                String userQuestion,
                                                                ChatMessage userMsg,
                                                                ChatMessage assistantMsg) {
         return transactionTemplate.execute(status -> {
             int currentIndex = conversationMessageMapper.getMaxIndex(sessionContext.sessionId());
-            userMsg.setMsgIndex(currentIndex + 1);
-            conversationMessageMapper.insert(sessionContext.sessionId(), userMsg, currentIndex + 1);
+            ChatMessage dbUserMsg = copyForDatabase(userMsg);
+            dbUserMsg.setMsgIndex(currentIndex + 1);
+            conversationMessageMapper.insert(sessionContext.sessionId(), dbUserMsg, currentIndex + 1);
 
-            assistantMsg.setMsgIndex(currentIndex + 2);
-            conversationMessageMapper.insert(sessionContext.sessionId(), assistantMsg, currentIndex + 2);
+            ChatMessage dbAssistantMsg = copyForDatabase(assistantMsg);
+            dbAssistantMsg.setMsgIndex(currentIndex + 2);
+            conversationMessageMapper.insert(sessionContext.sessionId(), dbAssistantMsg, currentIndex + 2);
 
             SessionIndex sessionIndex = sessionIndexMapper.findBySessionId(sessionContext.sessionId())
                     .orElseThrow(() -> new IllegalStateException("会话索引不存在: " + sessionContext.sessionId()));
             int nextPairCount = Optional.ofNullable(sessionIndex.getMessageCount()).orElse(0) + 1;
             sessionIndex.setMessageCount(nextPairCount);
             if (sessionIndex.getTitle() == null || sessionIndex.getTitle().isBlank()) {
-                sessionIndex.setTitle(buildTitle(userQuestion));
+                sessionIndex.setTitle(sanitizeForMysqlText(buildTitle(userQuestion)));
             }
+            sessionIndex.setSummary(sanitizeForMysqlText(sessionIndex.getSummary()));
             sessionIndexMapper.update(sessionIndex);
             logger.info("会话异步落库完成: userId={}, sessionId={}, pairCount={}",
                     sessionContext.userId(), sessionContext.sessionId(), nextPairCount);
@@ -195,6 +229,7 @@ public class PersistentSessionService {
                                         String userQuestion,
                                         String aiAnswer,
                                         List<ChatMessage> warmMessages,
+                                        List<ChatMessage> compressionMessages,
                                         PersistedConversation persisted) {
         if (persisted == null || persisted.sessionIndex() == null) {
             return;
@@ -203,47 +238,64 @@ public class PersistentSessionService {
         int nextPairCount = persisted.nextPairCount();
         SessionIndex sessionIndex = persisted.sessionIndex();
         CompressionDecision compressionDecision = shouldCompress(
-                sessionContext.sessionId(), nextPairCount, userQuestion, aiAnswer, warmMessages);
+                sessionContext.sessionId(), nextPairCount, userQuestion, aiAnswer, compressionMessages);
         if (compressionDecision.shouldCompress()) {
-            long startedAt = System.currentTimeMillis();
-            String previousSummary = sessionIndex.getSummary();
-            String summary = chatService.summarizeConversationMemory(previousSummary, toHistory(warmMessages));
-            int summaryTokens = TokenEstimator.estimateTextTokens(summary);
-            boolean milvusStored = true;
-            sessionIndex.setSummary(summary);
-            try {
-                userMemoryVectorStore.storeSessionSummary(sessionContext.userId(), sessionContext.sessionId(), summary);
-            } catch (Exception e) {
-                milvusStored = false;
-                logger.warn("会话 {} 写入 Milvus 语义记忆失败，已保留 MySQL 摘要: {}",
-                        sessionContext.sessionId(), e.getMessage());
+            if (!compressingSessions.add(sessionContext.sessionId())) {
+                compressionLogger.info(
+                        "event=session_compression_skipped sessionId={} reason=already_running pairCount={} warmMessages={} newMessages={}",
+                        sessionContext.sessionId(),
+                        nextPairCount,
+                        compressionDecision.warmMessageCount(),
+                        compressionDecision.newMessageCount());
+            } else {
+                try {
+                    long startedAt = System.currentTimeMillis();
+                    String previousSummary = sessionIndex.getSummary();
+                    List<ChatMessage> incrementalMessages = tailMessages(compressionMessages, compressionDecision.newMessageCount());
+                    int incrementalTokens = estimateMessagesTokens(incrementalMessages);
+                    String summary = chatService.summarizeConversationMemory(previousSummary, toHistory(incrementalMessages));
+                    int summaryTokens = TokenEstimator.estimateTextTokens(summary);
+                    boolean milvusStored = true;
+                    sessionIndex.setSummary(sanitizeForMysqlText(summary));
+                    try {
+                        userMemoryVectorStore.storeSessionSummary(sessionContext.userId(), sessionContext.sessionId(), summary);
+                    } catch (Exception e) {
+                        milvusStored = false;
+                        logger.warn("会话 {} 写入 Milvus 语义记忆失败，已保留 MySQL 摘要: {}",
+                                sessionContext.sessionId(), e.getMessage());
+                    }
+                    long durationMs = System.currentTimeMillis() - startedAt;
+                    logger.info("会话 {} 已更新增量摘要，触发原因: {}, 新增消息数: {}, 增量token: {}",
+                            sessionContext.sessionId(),
+                            compressionDecision.reason(),
+                            incrementalMessages.size(),
+                            incrementalTokens);
+                    compressionLogger.info(
+                            "event=session_compression_completed userId={} sessionId={} reason={} pairCount={} warmMessages={} newMessages={} compressedMessages={} estimatedTokens={} incrementalTokens={} currentExchangeTokens={} tokenThreshold={} redisThreshold={} previousSummaryChars={} newSummaryChars={} newSummaryTokens={} compressionRatio={} durationMs={} milvusStored={}",
+                            sessionContext.userId(),
+                            sessionContext.sessionId(),
+                            compressionDecision.reason(),
+                            nextPairCount,
+                            compressionDecision.warmMessageCount(),
+                            compressionDecision.newMessageCount(),
+                            incrementalMessages.size(),
+                            compressionDecision.estimatedTokens(),
+                            incrementalTokens,
+                            compressionDecision.currentExchangeTokens(),
+                            compressionDecision.tokenThreshold(),
+                            compressionDecision.redisThreshold(),
+                            textLength(previousSummary),
+                            textLength(summary),
+                            summaryTokens,
+                            formatRatio(summaryTokens, incrementalTokens),
+                            durationMs,
+                            milvusStored);
+                    transactionTemplate.executeWithoutResult(status -> sessionIndexMapper.update(sessionIndex));
+                    redisSessionStore.markCompressed(sessionContext.sessionId(), nextPairCount);
+                } finally {
+                    compressingSessions.remove(sessionContext.sessionId());
+                }
             }
-            long durationMs = System.currentTimeMillis() - startedAt;
-            logger.info("会话 {} 已更新持久化摘要，触发原因: {}, 热消息数: {}, 估算token: {}",
-                    sessionContext.sessionId(),
-                    compressionDecision.reason(),
-                    compressionDecision.warmMessageCount(),
-                    compressionDecision.estimatedTokens());
-            compressionLogger.info(
-                    "event=session_compression_completed userId={} sessionId={} reason={} pairCount={} warmMessages={} newMessages={} estimatedTokens={} currentExchangeTokens={} tokenThreshold={} redisThreshold={} previousSummaryChars={} newSummaryChars={} newSummaryTokens={} compressionRatio={} durationMs={} milvusStored={}",
-                    sessionContext.userId(),
-                    sessionContext.sessionId(),
-                    compressionDecision.reason(),
-                    nextPairCount,
-                    compressionDecision.warmMessageCount(),
-                    compressionDecision.newMessageCount(),
-                    compressionDecision.estimatedTokens(),
-                    compressionDecision.currentExchangeTokens(),
-                    compressionDecision.tokenThreshold(),
-                    compressionDecision.redisThreshold(),
-                    textLength(previousSummary),
-                    textLength(summary),
-                    summaryTokens,
-                    formatRatio(summaryTokens, compressionDecision.estimatedTokens()),
-                    durationMs,
-                    milvusStored);
-            transactionTemplate.executeWithoutResult(status -> sessionIndexMapper.update(sessionIndex));
-            redisSessionStore.markCompressed(sessionContext.sessionId(), nextPairCount);
         } else {
             compressionLogger.debug(
                     "event=session_compression_skipped sessionId={} reason={} pairCount={} warmMessages={} newMessages={} estimatedTokens={} currentExchangeTokens={} tokenThreshold={} redisThreshold={}",
@@ -346,13 +398,24 @@ public class PersistentSessionService {
             logger.info("用户 {} 开始压缩 {} 个会话", userId, userSessions.size());
 
             for (SessionIndex sessionIndex : userSessions) {
+                if (!compressingSessions.add(sessionIndex.getSessionId())) {
+                    compressionLogger.info(
+                            "event=session_compression_skipped sessionId={} reason=already_running pairCount={}",
+                            sessionIndex.getSessionId(),
+                            Optional.ofNullable(sessionIndex.getMessageCount()).orElse(0));
+                    continue;
+                }
                 try {
                     int totalPairs = Optional.ofNullable(sessionIndex.getMessageCount()).orElse(0);
                     if (totalPairs == 0) {
                         continue;
                     }
-                    // 直接从 MySQL 加载全量消息
-                    List<ChatMessage> messages = loadMessagesPage(sessionIndex.getSessionId(), 0, totalPairs * 2);
+                    int lastCompressedPairCount = redisSessionStore.getLastCompressedPairCount(sessionIndex.getSessionId());
+                    int afterIndex = Math.max(0, lastCompressedPairCount * 2);
+                    List<ChatMessage> messages = loadMessagesPage(
+                            sessionIndex.getSessionId(),
+                            afterIndex,
+                            Math.max(1, (totalPairs - lastCompressedPairCount) * 2));
                     if (messages.isEmpty()) {
                         continue;
                     }
@@ -362,7 +425,7 @@ public class PersistentSessionService {
                     int sourceTokens = estimateMessagesTokens(messages);
                     String summary = chatService.summarizeConversationMemory(previousSummary, toHistory(messages));
                     int summaryTokens = TokenEstimator.estimateTextTokens(summary);
-                    sessionIndex.setSummary(summary);
+                    sessionIndex.setSummary(sanitizeForMysqlText(summary));
                     sessionIndexMapper.update(sessionIndex);
                     userMemoryVectorStore.storeSessionSummary(sessionIndex.getUserId(), sessionIndex.getSessionId(), summary);
                     redisSessionStore.markCompressed(sessionIndex.getSessionId(), totalPairs);
@@ -387,6 +450,8 @@ public class PersistentSessionService {
                     logger.info("用户 {} 会话 {} 摘要已保存到 Milvus", userId, sessionIndex.getSessionId());
                 } catch (Exception e) {
                     logger.warn("用户 {} 会话 {} 压缩失败: {}", userId, sessionIndex.getSessionId(), e.getMessage());
+                } finally {
+                    compressingSessions.remove(sessionIndex.getSessionId());
                 }
             }
             logger.info("用户 {} 所有会话压缩完成", userId);
@@ -463,24 +528,23 @@ public class PersistentSessionService {
                     currentExchangeTokens, newMessageCount, tokenThreshold, redisThreshold);
         }
 
-        //第二层：根据Redis消息上限判断是否压缩
-        if (warmMessageCount >= redisThreshold
+        //第二层：Redis最多保留10轮，达到第11轮时触发增量压缩。
+        if (newMessageCount >= redisThreshold
                 && newMessageCount >= minMessages) {
-            return new CompressionDecision(true, "redis_near_limit", warmMessageCount, estimatedTokens,
-                    currentExchangeTokens, newMessageCount, tokenThreshold, redisThreshold);
-        }
-
-        //第三层判断：固定轮次周期检查。
-        int interval = storageProperties.getCompressionInterval();
-        if (interval > 0
-                && nextPairCount % interval == 0
-                && newMessageCount >= minMessages) {
-            return new CompressionDecision(true, "periodic_check", warmMessageCount, estimatedTokens,
+            return new CompressionDecision(true, "redis_round_limit", warmMessageCount, estimatedTokens,
                     currentExchangeTokens, newMessageCount, tokenThreshold, redisThreshold);
         }
 
         return new CompressionDecision(false, "skip", warmMessageCount, estimatedTokens,
                 currentExchangeTokens, newMessageCount, tokenThreshold, redisThreshold);
+    }
+
+    private List<ChatMessage> tailMessages(List<ChatMessage> messages, int count) {
+        if (messages == null || messages.isEmpty() || count <= 0) {
+            return List.of();
+        }
+        int fromIndex = Math.max(0, messages.size() - count);
+        return new ArrayList<>(messages.subList(fromIndex, messages.size()));
     }
 
     private int estimateMessagesTokens(List<ChatMessage> messages) {
@@ -501,8 +565,39 @@ public class PersistentSessionService {
     }
 
     private int redisThreshold() {
-        return Math.max(1, (int) Math.ceil(
-                storageProperties.getRedisMaxMessages() * storageProperties.getCompressionRedisUsageRatio()));
+        return Math.max(1, storageProperties.getRedisMaxMessages() + 2);
+    }
+
+    private ChatMessage copyForDatabase(ChatMessage source) {
+        ChatMessage copy = new ChatMessage();
+        copy.setMsgId(source.getMsgId());
+        copy.setRole(source.getRole());
+        copy.setContent(sanitizeForMysqlText(source.getContent()));
+        copy.setTimestamp(source.getTimestamp());
+        copy.setCreatedAt(source.getCreatedAt());
+        copy.setMsgIndex(source.getMsgIndex());
+        return copy;
+    }
+
+    private String sanitizeForMysqlText(String text) {
+        if (text == null || text.isEmpty()) {
+            return text;
+        }
+        StringBuilder builder = null;
+        for (int i = 0; i < text.length(); ) {
+            int codePoint = text.codePointAt(i);
+            int charCount = Character.charCount(codePoint);
+            boolean supportedByMysqlUtf8 = codePoint <= 0xFFFF && codePoint != 0;
+            if (!supportedByMysqlUtf8 && builder == null) {
+                builder = new StringBuilder(text.length());
+                builder.append(text, 0, i);
+            }
+            if (supportedByMysqlUtf8 && builder != null) {
+                builder.appendCodePoint(codePoint);
+            }
+            i += charCount;
+        }
+        return builder == null ? text : builder.toString();
     }
 
     private void triggerPersonaExtraction(SessionContext sessionContext,
@@ -538,6 +633,17 @@ public class PersistentSessionService {
             Thread.currentThread().interrupt();
             List<Runnable> droppedTasks = persistenceExecutor.shutdownNow();
             logger.warn("等待会话异步保存任务完成时被中断，未完成任务数: {}", droppedTasks.size());
+        }
+        compressionExecutor.shutdown();
+        try {
+            if (!compressionExecutor.awaitTermination(20, TimeUnit.SECONDS)) {
+                List<Runnable> droppedTasks = compressionExecutor.shutdownNow();
+                logger.warn("关闭前仍有 {} 个会话压缩任务未完成", droppedTasks.size());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            List<Runnable> droppedTasks = compressionExecutor.shutdownNow();
+            logger.warn("等待会话压缩任务完成时被中断，未完成任务数: {}", droppedTasks.size());
         }
     }
 

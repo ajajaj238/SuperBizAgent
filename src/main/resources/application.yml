@@ -31,7 +31,7 @@ spring:
       - org.springframework.ai.mcp.client.webflux.autoconfigure.SseWebFluxTransportAutoConfiguration
       - org.springframework.ai.mcp.client.webflux.autoconfigure.StreamableHttpWebFluxTransportAutoConfiguration
   datasource:
-    url: jdbc:mysql://127.0.0.1:3306/super-big-agent?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
+    url: jdbc:mysql://127.0.0.1:3306/super-big-agent?useUnicode=true&characterEncoding=UTF-8&connectionCollation=utf8mb4_unicode_ci&serverTimezone=Asia/Shanghai
     username: root
     password: zhj123456
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -120,7 +120,7 @@ ai:
       intent-classification: fast
       query-rewrite: fast
       persona-extraction: fast
-      memory-summary: balanced
+      memory-summary: fast
       aiops-report: reasoning
 
 # 文档分片配置
@@ -187,10 +187,9 @@ session:
     persona-path: ./data/personas
     redis-ttl: 24h
     redis-max-messages: 20
-    compression-interval: 5
-    compression-token-threshold: 3000
-    compression-min-messages: 6
-    compression-redis-usage-ratio: 0.8
+    compression-interval: 0
+    compression-token-threshold: 2000
+    compression-min-messages: 2
     llm-context-window: 10
     semantic-top-k: 3
     db-page-size: 20

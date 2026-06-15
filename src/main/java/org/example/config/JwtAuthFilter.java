@@ -78,10 +78,15 @@ public class JwtAuthFilter implements Filter {
                     claims.getSubject(),
                     claims.get("role", String.class)
             );
-            chain.doFilter(request, response);
         } catch (Exception e) {
             logger.warn("JWT 验证失败: {}", e.getMessage());
             unauthorized(resp, "令牌无效或已过期");
+            UserContext.clear();
+            return;
+        }
+
+        try {
+            chain.doFilter(request, response);
         } finally {
             UserContext.clear();
         }
@@ -96,8 +101,13 @@ public class JwtAuthFilter implements Filter {
     }
 
     private void unauthorized(HttpServletResponse resp, String msg) throws IOException {
+        if (resp.isCommitted()) {
+            logger.warn("响应已提交，跳过401写入: {}", msg);
+            return;
+        }
+        resp.resetBuffer();
         resp.setStatus(401);
         resp.setContentType("application/json;charset=UTF-8");
-        resp.getWriter().write("{\"code\":401,\"message\":\"" + msg + "\"}");
+        resp.getOutputStream().write(("{\"code\":401,\"message\":\"" + msg + "\"}").getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 }
