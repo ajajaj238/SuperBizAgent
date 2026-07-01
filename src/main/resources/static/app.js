@@ -17,6 +17,7 @@ class SuperBizAgentApp {
         this.currentChatHistory = []; // 当前对话的消息历史
         this.chatHistories = []; // 从后端加载
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
+        this.exitCompressionRequested = false;
 
         this.initializeElements();
         this.bindEvents();
@@ -72,7 +73,7 @@ class SuperBizAgentApp {
     async logout() {
         // 退出前先保存对话摘要到 Milvus
         try {
-            await this.apiFetch(`${this.apiBaseUrl}/session/compress`, { method: 'POST' });
+            await this.requestExitCompression(false);
         } catch (e) {
             console.warn('保存摘要失败（不影响退出）:', e);
         }
@@ -82,6 +83,22 @@ class SuperBizAgentApp {
         localStorage.removeItem('user');
         localStorage.removeItem('savedUsername');
         window.location.replace('/login.html');
+    }
+
+    requestExitCompression(keepalive = false) {
+        if (this.exitCompressionRequested || !this.token) {
+            return Promise.resolve();
+        }
+        this.exitCompressionRequested = true;
+        return fetch(`${this.apiBaseUrl}/session/compress`, {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + this.token
+            },
+            keepalive
+        }).catch(e => {
+            console.warn('提交退出压缩失败（不影响退出）:', e);
+        });
     }
 
     /**
@@ -358,6 +375,10 @@ class SuperBizAgentApp {
         if (this.logoutBtn) {
             this.logoutBtn.addEventListener('click', () => this.logout());
         }
+
+        window.addEventListener('pagehide', () => {
+            this.requestExitCompression(true);
+        });
     }
 
     // 切换工具菜单显示/隐藏

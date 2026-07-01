@@ -96,10 +96,16 @@ public class ChatController {
 
             // 获取历史消息
             List<Map<String, String>> history = persistentSessionService.getRecentHistory(session);
+            // 获取语义记忆
+            long startTime = System.currentTimeMillis();
             List<String> semanticMemories = persistentSessionService.getSemanticMemories(session, request.getQuestion());
+            logger.info("语义记忆检索耗时: {} ms", System.currentTimeMillis() - startTime);
             logger.info("会话历史消息对数: {}", history.size() / 2);
 
+            //意图识别
+            long startTime1 = System.currentTimeMillis();
             IntentResult intentResult = intentClassifier.classify(request.getQuestion(), session.sessionId(), history);
+            logger.info("意图识别耗时: {} ms", System.currentTimeMillis() - startTime1);
             recordIntent(session.sessionId(), intentResult);
 
             if (intentResult.getIntent() == UserIntent.SYSTEM_OPERATION) {
@@ -141,19 +147,22 @@ public class ChatController {
             String personaPrompt = personaService.buildPersonaPrompt(session.userId());
 
             // 每次回答前先执行 RAG 预检索，再将检索结果注入问题上下文
+            long startTime2 = System.currentTimeMillis();
             String enrichedQuestion = chatService.buildAgentUserPrompt(
                     history,
                     semanticMemories,
                     request.getQuestion(),
                     chatService.shouldEnableRag(intentResult.getIntent()));
-
+            logger.info("RAG 预检索耗时: {} ms", System.currentTimeMillis() - startTime2);
             // 将用户画像追加到问题前
             if (!personaPrompt.isBlank()) {
                 enrichedQuestion = personaPrompt + "\n" + enrichedQuestion;
             }
 
             // 执行对话
+            long startTime3 = System.currentTimeMillis();
             String fullAnswer = chatService.executeChat(agent, monitoredChatModel, systemPrompt, enrichedQuestion);
+            logger.info("llm回复耗时: {} ms", System.currentTimeMillis() - startTime3);
 
             // 更新会话历史
             int pairCount = persistentSessionService.appendConversation(session, request.getQuestion(), fullAnswer, chatService);
@@ -514,7 +523,7 @@ public class ChatController {
             return ResponseEntity.ok(ApiResponse.success("ok"));
         }
         // 异步执行摘要压缩，不阻塞前端退出
-        executor.execute(() -> persistentSessionService.compressUserSessions(userId));
+        persistentSessionService.compressUserSessionsAsync(userId, "user_logout");
         return ResponseEntity.ok(ApiResponse.success("ok"));
     }
 

@@ -50,10 +50,12 @@ public class RedisSessionStore {
 
     public List<ChatMessage> getRecentMessages(Long userId, String sessionId, int n) {
         String key = sessionKey(sessionId);
+        //获取倒数第一条至倒数第n条消息
         List<String> raw = redisTemplate.opsForList().range(key, -n, -1);
         if (raw != null && !raw.isEmpty()) {
             return parse(raw);
         }
+        //尝试从数据库加载
         return reloadFromDb(sessionId);
     }
 
@@ -124,6 +126,7 @@ public class RedisSessionStore {
         }
 
         String key = sessionKey(sessionId);
+        //保存redis
         for (ChatMessage message : recent) {
             redisTemplate.opsForList().rightPush(key, toJson(message));
         }
