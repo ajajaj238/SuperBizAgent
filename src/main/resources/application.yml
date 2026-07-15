@@ -211,3 +211,10 @@ mybatis:
 jwt:
   secret: "SuperBizAgent-JWT-Secret-Key-2026-Must-Be-At-Least-256-Bits-Long!!"
   expiration: 86400
+
+# SuperBizAgent MCP Server 配置
+superbiz:
+  mcp:
+    enabled: true
+    # 本地开发默认留空，Claude/Cursor 可直接连接；生产环境建议配置环境变量并通过 Authorization: Bearer xxx 调用
+    api-key: ${SUPERBIZ_MCP_API_KEY:}
