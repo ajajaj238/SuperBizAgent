@@ -13,6 +13,7 @@ import org.example.monitor.TokenUsageRecorder;
 import org.example.service.AiOpsService;
 import org.example.service.ChatService;
 import org.example.service.ModelRoutingService;
+import org.example.service.QueryRewriteService;
 import org.example.config.UserContext;
 import org.example.entity.SessionIndex;
 import org.example.service.intent.HybridIntentClassifier;
@@ -70,6 +71,9 @@ public class ChatController {
     @Autowired
     private PersonaService personaService;
 
+    @Autowired
+    private QueryRewriteService queryRewriteService;
+
     private final ExecutorService executor = new ThreadPoolExecutor(
             4, 20, 60L, TimeUnit.SECONDS,
             new LinkedBlockingQueue<>(256),
@@ -96,15 +100,20 @@ public class ChatController {
 
             // 获取历史消息
             List<Map<String, String>> history = persistentSessionService.getRecentHistory(session);
+            QueryRewriteService.RewriteResult rewriteResult =
+                    queryRewriteService.rewriteForRetrieval(request.getQuestion(), history);
+            String contextualQuestion = rewriteResult.rewritten()
+                    ? rewriteResult.rewrittenQuery()
+                    : request.getQuestion();
             // 获取语义记忆
             long startTime = System.currentTimeMillis();
-            List<String> semanticMemories = persistentSessionService.getSemanticMemories(session, request.getQuestion());
+            List<String> semanticMemories = persistentSessionService.getSemanticMemories(session, contextualQuestion);
             logger.info("语义记忆检索耗时: {} ms", System.currentTimeMillis() - startTime);
             logger.info("会话历史消息对数: {}", history.size() / 2);
 
             //意图识别
             long startTime1 = System.currentTimeMillis();
-            IntentResult intentResult = intentClassifier.classify(request.getQuestion(), session.sessionId(), history);
+            IntentResult intentResult = intentClassifier.classify(contextualQuestion, session.sessionId(), history);
             logger.info("意图识别耗时: {} ms", System.currentTimeMillis() - startTime1);
             recordIntent(session.sessionId(), intentResult);
 
@@ -152,7 +161,8 @@ public class ChatController {
                     history,
                     semanticMemories,
                     request.getQuestion(),
-                    chatService.shouldEnableRag(intentResult.getIntent()));
+                    chatService.shouldEnableRag(intentResult.getIntent()),
+                    rewriteResult);
             logger.info("RAG 预检索耗时: {} ms", System.currentTimeMillis() - startTime2);
             // 将用户画像追加到问题前
             if (!personaPrompt.isBlank()) {
@@ -240,10 +250,15 @@ public class ChatController {
 
                 // 获取历史消息
                 List<Map<String, String>> history = persistentSessionService.getRecentHistory(session);
-                List<String> semanticMemories = persistentSessionService.getSemanticMemories(session, request.getQuestion());
+                QueryRewriteService.RewriteResult rewriteResult =
+                        queryRewriteService.rewriteForRetrieval(request.getQuestion(), history);
+                String contextualQuestion = rewriteResult.rewritten()
+                        ? rewriteResult.rewrittenQuery()
+                        : request.getQuestion();
+                List<String> semanticMemories = persistentSessionService.getSemanticMemories(session, contextualQuestion);
                 logger.info("ReactAgent 会话历史消息对数: {}", history.size() / 2);
 
-                IntentResult intentResult = intentClassifier.classify(request.getQuestion(), session.sessionId(), history);
+                IntentResult intentResult = intentClassifier.classify(contextualQuestion, session.sessionId(), history);
                 recordIntent(session.sessionId(), intentResult);
 
                 if (intentResult.getIntent() == UserIntent.SYSTEM_OPERATION) {
@@ -296,7 +311,8 @@ public class ChatController {
                         history,
                         semanticMemories,
                         request.getQuestion(),
-                        chatService.shouldEnableRag(intentResult.getIntent()));
+                        chatService.shouldEnableRag(intentResult.getIntent()),
+                        rewriteResult);
 
                 // 将用户画像追加到问题前
                 String finalQuestion = !personaPrompt.isBlank()

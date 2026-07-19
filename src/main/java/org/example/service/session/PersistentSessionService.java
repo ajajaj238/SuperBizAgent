@@ -23,8 +23,12 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.Future;
 import java.util.UUID;
 
 @Service
@@ -58,6 +62,13 @@ public class PersistentSessionService {
             TimeUnit.SECONDS,
             new LinkedBlockingQueue<>(100),
             new ThreadPoolExecutor.CallerRunsPolicy());
+    private final ExecutorService semanticMemoryExecutor = new ThreadPoolExecutor(
+            4,
+            20,
+            30L,
+            TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(32),
+            new ThreadPoolExecutor.AbortPolicy());
 
     public PersistentSessionService(UserAccountMapper userAccountMapper,
                                     SessionIndexMapper sessionIndexMapper,
@@ -97,7 +108,8 @@ public class PersistentSessionService {
                 user.getUsername(),
                 sessionIndex.getSessionId(),
                 sessionIndex.getCreatedAt(),
-                Optional.ofNullable(sessionIndex.getMessageCount()).orElse(0)
+                Optional.ofNullable(sessionIndex.getMessageCount()).orElse(0),
+                hasText(sessionIndex.getSummary())
         );
     }
 
@@ -115,13 +127,38 @@ public class PersistentSessionService {
     }
 
     public List<String> getSemanticMemories(SessionContext sessionContext, String currentQuestion) {
+        if (!sessionContext.hasSemanticMemory()) {
+            logger.debug("会话 {} 尚无压缩摘要，跳过语义记忆检索", sessionContext.sessionId());
+            return List.of();
+        }
+
+        long timeoutMillis = Math.max(100L, storageProperties.getSemanticSearchTimeout().toMillis());
+        Future<List<String>> searchFuture;
         try {
-            return userMemoryVectorStore.searchRelevantMemories(
-                    sessionContext.userId(),
-                    sessionContext.sessionId(),
-                    currentQuestion,
-                    storageProperties.getSemanticTopK()
-            );
+            searchFuture = semanticMemoryExecutor.submit(() -> userMemoryVectorStore.searchRelevantMemories(
+                    sessionContext.userId(), sessionContext.sessionId(), currentQuestion,
+                    storageProperties.getSemanticTopK()));
+        } catch (RuntimeException e) {
+            logger.warn("语义记忆检索线程池繁忙，已降级为短期上下文: sessionId={}", sessionContext.sessionId());
+            return List.of();
+        }
+
+        try {
+            return searchFuture.get(timeoutMillis, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            searchFuture.cancel(true);
+            logger.warn("语义记忆检索超时，已降级为短期上下文: sessionId={}, timeoutMs={}",
+                    sessionContext.sessionId(), timeoutMillis);
+            return List.of();
+        } catch (InterruptedException e) {
+            searchFuture.cancel(true);
+            Thread.currentThread().interrupt();
+            return List.of();
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            logger.warn("读取会话 {} 的语义记忆失败，继续走短期上下文: {}",
+                    sessionContext.sessionId(), cause.getMessage());
+            return List.of();
         } catch (Exception e) {
             logger.warn("读取会话 {} 的语义记忆失败，继续走短期上下文: {}", sessionContext.sessionId(), e.getMessage());
             return List.of();
@@ -324,7 +361,8 @@ public class PersistentSessionService {
                             user == null ? DEFAULT_USERNAME : user.getUsername(),
                             index.getSessionId(),
                             index.getCreatedAt(),
-                            Optional.ofNullable(index.getMessageCount()).orElse(0)
+                            Optional.ofNullable(index.getMessageCount()).orElse(0),
+                            hasText(index.getSummary())
                     );
                 });
     }
@@ -607,6 +645,7 @@ public class PersistentSessionService {
     }
 
     private void awaitPendingPersistenceTasks() {
+        semanticMemoryExecutor.shutdownNow();
         persistenceExecutor.shutdown();
         try {
             if (!persistenceExecutor.awaitTermination(20, TimeUnit.SECONDS)) {
@@ -633,6 +672,10 @@ public class PersistentSessionService {
 
     private int textLength(String text) {
         return text == null ? 0 : text.length();
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
     }
 
     private String formatRatio(int compressedTokens, int originalTokens) {

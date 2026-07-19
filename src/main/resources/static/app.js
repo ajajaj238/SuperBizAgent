@@ -11,7 +11,7 @@ class SuperBizAgentApp {
         this.token = token;
         this.currentUser = this.getCurrentUser();
         this.apiBaseUrl = '/api';
-        this.currentMode = 'quick'; // 'quick' 或 'stream'
+        this.currentMode = 'stream'; // 默认流式输出，仍可手动切换为快速模式
         this.sessionId = this.generateSessionId();
         this.isStreaming = false;
         this.currentChatHistory = []; // 当前对话的消息历史
@@ -442,8 +442,8 @@ class SuperBizAgentApp {
         // 生成新的会话ID
         this.sessionId = this.generateSessionId();
         
-        // 重置模式为快速
-        this.currentMode = 'quick';
+        // 新会话默认使用流式输出
+        this.currentMode = 'stream';
         this.updateUI();
         
         // 重新设置居中样式（确保对话框居中显示）

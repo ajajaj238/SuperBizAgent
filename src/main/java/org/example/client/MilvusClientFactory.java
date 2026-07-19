@@ -168,7 +168,7 @@ public class MilvusClientFactory {
                 .withFieldName("vector")
                 .withIndexType(IndexType.IVF_FLAT)
                 .withMetricType(MetricType.COSINE)  // 余弦相似度
-                .withExtraParam("{\"nlist\":128}")
+                .withExtraParam("{\"nlist\":68}")
                 .withSyncMode(Boolean.FALSE)
                 .build();
 
@@ -243,7 +243,7 @@ public class MilvusClientFactory {
                 .withFieldName("embedding")
                 .withIndexType(IndexType.IVF_FLAT)
                 .withMetricType(MetricType.COSINE)
-                .withExtraParam("{\"nlist\":128}")
+                .withExtraParam("{\"nlist\":68}")
                 .withSyncMode(Boolean.FALSE)
                 .build();
 

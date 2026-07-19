@@ -20,7 +20,17 @@ public class ModelRoutingService {
 
     public ModelSpec forIntent(UserIntent intent) {
         String key = intent == null ? "ambiguous" : toKebabCase(intent.name());
-        return spec(resolveTier(properties.getIntent().get(key), defaultTierForIntent(intent)));
+        ModelSpec baseSpec = spec(resolveTier(properties.getIntent().get(key), defaultTierForIntent(intent)));
+        Integer configuredMaxToken = properties.getIntentMaxToken().get(key);
+        if (configuredMaxToken == null || configuredMaxToken <= 0) {
+            return baseSpec;
+        }
+        return new ModelSpec(
+                baseSpec.tier(),
+                baseSpec.modelName(),
+                baseSpec.temperature(),
+                Math.min(baseSpec.maxToken(), configuredMaxToken),
+                baseSpec.topP());
     }
 
     public ModelSpec forTask(ModelTask task) {

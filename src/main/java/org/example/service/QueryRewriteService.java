@@ -17,13 +17,17 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 面向 RAG 检索的 Query Rewrite。
- * 优先使用 LLM 生成独立检索 query，失败时回退到规则改写。
+ * 将多轮对话中的短追问改写为独立查询。
+ * LLM 负责语义补全，失败时使用规则结果兜底。
  */
 @Service
 public class QueryRewriteService {
@@ -32,15 +36,39 @@ public class QueryRewriteService {
     private static final int MAX_CONTEXT_CHARS = 80;
     private static final int MAX_REWRITTEN_CHARS = 160;
     private static final Pattern FOLLOW_UP_PATTERN = Pattern.compile(
-            ".*(那|那么|这个|这个呢|它|它呢|还有|也|呢|怎么处理|怎么排查|如何处理|如何排查|日志|指标|告警).*");
+            ".*(呢|那|那么|这个|它呢|还有|也一样|怎么办|继续|接着).*");
+    private static final Pattern CONTEXT_ANCHOR_PATTERN = Pattern.compile(
+            ".*(怎么|如何|处理|排查|原因|解决|查询|告警|飙高|过高|异常|报错).*");
+    private static final List<TopicGroup> TOPIC_GROUPS = List.of(
+            new TopicGroup("CPU", List.of("cpu", "处理器")),
+            new TopicGroup("内存", List.of("内存", "memory", "ram")),
+            new TopicGroup("磁盘", List.of("磁盘", "硬盘", "disk")),
+            new TopicGroup("网络", List.of("网络", "带宽", "network")),
+            new TopicGroup("数据库", List.of("数据库", "database")),
+            new TopicGroup("Redis", List.of("redis")),
+            new TopicGroup("MySQL", List.of("mysql")),
+            new TopicGroup("JVM", List.of("jvm")),
+            new TopicGroup("Pod", List.of("pod")),
+            new TopicGroup("容器", List.of("容器", "container")),
+            new TopicGroup("线程", List.of("线程", "thread")),
+            new TopicGroup("进程", List.of("进程", "process")),
+            new TopicGroup("接口", List.of("接口", "api")),
+            new TopicGroup("日志", List.of("日志", "log")),
+            new TopicGroup("告警", List.of("告警", "alert"))
+    );
     private static final String SYSTEM_PROMPT = """
-            你是 RAG 检索 query 改写器。你的任务是把多轮对话中的当前问题改写成一个独立、完整、适合向量检索的中文查询。
+            你是查询改写器。请把多轮对话中的当前追问改写成一个独立、完整的问题，
+            以便后续进行意图识别和知识检索。
 
             要求：
-            - 只补全检索必要上下文，不回答问题。
+            - 只补全当前问题缺失的主语、对象和诉求，不回答问题。
+            - 结合最近对话判断用户真正承接的主题，不要机械使用紧邻但无关的闲聊。
+            - 当前问题明确出现新对象时，新对象必须替换上一轮对象，只继承上一轮的诉求。
+              例如上一轮是“CPU飙高怎么办”，当前是“内存呢”，应改写为“内存使用率飙高怎么办”，
+              不能改写为“CPU飙高时内存如何处理”。
             - 保留服务名、指标名、告警名、错误码、时间范围等关键信息。
             - 当前问题已经完整时，needRewrite=false。
-            - 不要编造历史中没有出现的事实。
+            - 不要编造历史对话中没有出现的事实。
             - 输出严格 JSON，不要输出 Markdown。
 
             JSON 格式：
@@ -85,12 +113,14 @@ public class QueryRewriteService {
         if (safeQuestion.isBlank()) {
             return RewriteResult.notRewritten(question, "blank_question");
         }
+        if (isSelfContainedShortQuestion(safeQuestion)) {
+            return RewriteResult.notRewritten(safeQuestion, "self_contained_question");
+        }
 
-        String previousUserQuestion = lastUserQuestion(history);
+        String previousUserQuestion = lastContextQuestion(history);
         if (previousUserQuestion.isBlank()) {
             return RewriteResult.notRewritten(safeQuestion, "no_previous_user_question");
         }
-
         if (!shouldRewrite(safeQuestion)) {
             return RewriteResult.notRewritten(safeQuestion, "no_followup_signal");
         }
@@ -115,8 +145,10 @@ public class QueryRewriteService {
             return new RewriteCandidate(fallbackQuery, "rule", "dashscope_api_key_missing");
         }
         try {
-            ChatModel model = new MonitoringChatModel(createRewriteModel(), tokenUsageRecorder,
-                    modelRoutingService.forTask(ModelRoutingService.ModelTask.QUERY_REWRITE).modelName());
+            ModelRoutingService.ModelSpec rewriteSpec =
+                    modelRoutingService.forTask(ModelRoutingService.ModelTask.QUERY_REWRITE);
+            ChatModel model = new MonitoringChatModel(
+                    createRewriteModel(rewriteSpec), tokenUsageRecorder, rewriteSpec.modelName());
             ChatResponse response = model.call(new Prompt(List.of(
                     new SystemMessage(SYSTEM_PROMPT),
                     new UserMessage(buildRewritePrompt(question, history))
@@ -127,6 +159,10 @@ public class QueryRewriteService {
             rewriteLogger.info("event=query_rewrite_llm_raw original='{}' response='{}'", question, text);
             String rewritten = parseStandaloneQuery(text);
             if (!rewritten.isBlank()) {
+                String previousQuestion = lastContextQuestion(history);
+                if (!isTopicConsistent(question, previousQuestion, rewritten)) {
+                    return new RewriteCandidate(fallbackQuery, "rule", "llm_topic_mismatch");
+                }
                 return new RewriteCandidate(
                         truncate(normalize(rewritten), positiveOrDefault(maxRewrittenChars, MAX_REWRITTEN_CHARS)),
                         "llm",
@@ -138,18 +174,17 @@ public class QueryRewriteService {
         }
     }
 
-    private DashScopeChatModel createRewriteModel() {
+    private DashScopeChatModel createRewriteModel(ModelRoutingService.ModelSpec spec) {
         DashScopeApi dashScopeApi = DashScopeApi.builder()
                 .apiKey(dashScopeApiKey)
                 .build();
-        ModelRoutingService.ModelSpec spec = modelRoutingService.forTask(ModelRoutingService.ModelTask.QUERY_REWRITE);
-        spec = new ModelRoutingService.ModelSpec(
+        ModelRoutingService.ModelSpec limitedSpec = new ModelRoutingService.ModelSpec(
                 spec.tier(),
                 spec.modelName(),
                 0.1,
                 positiveOrDefault(llmMaxToken, 256),
                 0.5);
-        return modelRoutingService.createChatModel(dashScopeApi, spec);
+        return modelRoutingService.createChatModel(dashScopeApi, limitedSpec);
     }
 
     private String buildRewritePrompt(String question, List<Map<String, String>> history) {
@@ -167,14 +202,16 @@ public class QueryRewriteService {
             return "无";
         }
         List<String> lines = new ArrayList<>();
-        int start = Math.max(0, history.size() - 6);
+        int start = Math.max(0, history.size() - 8);
         for (int i = start; i < history.size(); i++) {
             Map<String, String> item = history.get(i);
             if (item == null) {
                 continue;
             }
             String role = "assistant".equals(item.get("role")) ? "助手" : "用户";
-            String content = truncate(normalize(item.get("content")), positiveOrDefault(maxContextChars, MAX_CONTEXT_CHARS));
+            String content = truncate(
+                    normalize(item.get("content")),
+                    positiveOrDefault(maxContextChars, MAX_CONTEXT_CHARS));
             if (!content.isBlank()) {
                 lines.add(role + ": " + content);
             }
@@ -183,10 +220,8 @@ public class QueryRewriteService {
     }
 
     private String parseStandaloneQuery(String responseText) throws Exception {
-        String json = extractJson(responseText);
-        JsonNode node = objectMapper.readTree(json);
-        boolean needRewrite = node.path("needRewrite").asBoolean(false);
-        if (!needRewrite) {
+        JsonNode node = objectMapper.readTree(extractJson(responseText));
+        if (!node.path("needRewrite").asBoolean(false)) {
             return "";
         }
         return normalize(node.path("standaloneQuery").asText(""));
@@ -198,21 +233,18 @@ public class QueryRewriteService {
         }
         int start = text.indexOf('{');
         int end = text.lastIndexOf('}');
-        if (start >= 0 && end > start) {
-            return text.substring(start, end + 1);
-        }
-        return text;
+        return start >= 0 && end > start ? text.substring(start, end + 1) : text;
     }
 
     private boolean shouldRewrite(String question) {
         String normalized = normalize(question);
-        if (normalized.length() <= 16 && FOLLOW_UP_PATTERN.matcher(normalized).matches()) {
-            return true;
-        }
         if (normalized.length() <= 8) {
             return true;
         }
-        return startsWithFollowUpCue(normalized);
+        if (startsWithFollowUpCue(normalized)) {
+            return true;
+        }
+        return normalized.length() <= 16 && FOLLOW_UP_PATTERN.matcher(normalized).matches();
     }
 
     private boolean startsWithFollowUpCue(String question) {
@@ -221,44 +253,142 @@ public class QueryRewriteService {
                 || question.startsWith("这个")
                 || question.startsWith("它")
                 || question.startsWith("还有")
-                || question.startsWith("也");
+                || question.startsWith("继续")
+                || question.startsWith("接着");
+    }
+
+    private boolean isSelfContainedShortQuestion(String question) {
+        String normalized = normalize(question).toLowerCase();
+        return normalized.matches(".*(你是谁|你叫什么|我是谁|我叫什么|介绍一下自己|你能做什么).*")
+                || normalized.matches(".*(现在几点|当前时间|今天几号|今天日期|星期几|周几).*")
+                || normalized.matches(".*(清空历史|删除会话|开始新对话|重置会话).*")
+                || normalized.matches("^(你好|您好|hello|hi|嗨|谢谢|感谢|再见|拜拜)[!！。\\s]*$");
     }
 
     private String buildStandaloneQuery(String previousUserQuestion, String question) {
-        String context = truncate(normalize(previousUserQuestion), positiveOrDefault(maxContextChars, MAX_CONTEXT_CHARS));
+        String topicReplacement = buildTopicReplacement(previousUserQuestion, question);
+        if (!topicReplacement.isBlank()) {
+            return truncate(
+                    topicReplacement,
+                    positiveOrDefault(maxRewrittenChars, MAX_REWRITTEN_CHARS));
+        }
+        String context = truncate(
+                normalize(previousUserQuestion),
+                positiveOrDefault(maxContextChars, MAX_CONTEXT_CHARS));
         String current = normalizeFollowUpPrefix(question);
-        String rewritten = "基于上一轮问题：" + context + "；当前追问：" + current;
-        return truncate(rewritten, positiveOrDefault(maxRewrittenChars, MAX_REWRITTEN_CHARS));
+        return truncate(
+                "基于上一轮问题：" + context + "；当前追问：" + current,
+                positiveOrDefault(maxRewrittenChars, MAX_REWRITTEN_CHARS));
+    }
+
+    private String buildTopicReplacement(String previousQuestion, String currentQuestion) {
+        Set<TopicGroup> currentTopics = topicsIn(currentQuestion);
+        Set<TopicGroup> previousTopics = topicsIn(previousQuestion);
+        if (currentTopics.size() != 1 || previousTopics.isEmpty()) {
+            return "";
+        }
+
+        TopicGroup currentTopic = currentTopics.iterator().next();
+        TopicGroup previousTopic = previousTopics.stream()
+                .filter(topic -> !topic.equals(currentTopic))
+                .findFirst()
+                .orElse(null);
+        if (previousTopic == null) {
+            return "";
+        }
+
+        String rewritten = previousQuestion;
+        for (String alias : previousTopic.aliases()) {
+            rewritten = replaceIgnoreCase(rewritten, alias, currentTopic.canonical());
+        }
+        return rewritten.equals(previousQuestion) ? "" : normalize(rewritten);
+    }
+
+    private boolean isTopicConsistent(String currentQuestion,
+                                      String previousQuestion,
+                                      String rewrittenQuestion) {
+        Set<TopicGroup> currentTopics = topicsIn(currentQuestion);
+        if (currentTopics.isEmpty()) {
+            return true;
+        }
+
+        Set<TopicGroup> rewrittenTopics = topicsIn(rewrittenQuestion);
+        if (!rewrittenTopics.containsAll(currentTopics)) {
+            return false;
+        }
+        if (isComparisonQuestion(currentQuestion)) {
+            return true;
+        }
+
+        Set<TopicGroup> staleTopics = topicsIn(previousQuestion);
+        staleTopics.removeAll(currentTopics);
+        for (TopicGroup staleTopic : staleTopics) {
+            if (rewrittenTopics.contains(staleTopic)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isComparisonQuestion(String question) {
+        String normalized = normalize(question);
+        return normalized.contains("和")
+                || normalized.contains("与")
+                || normalized.contains("相比")
+                || normalized.contains("对比");
+    }
+
+    private Set<TopicGroup> topicsIn(String text) {
+        String normalized = normalize(text).toLowerCase(Locale.ROOT);
+        Set<TopicGroup> topics = new LinkedHashSet<>();
+        for (TopicGroup topic : TOPIC_GROUPS) {
+            if (topic.aliases().stream()
+                    .map(alias -> alias.toLowerCase(Locale.ROOT))
+                    .anyMatch(normalized::contains)) {
+                topics.add(topic);
+            }
+        }
+        return topics;
+    }
+
+    private String replaceIgnoreCase(String source, String target, String replacement) {
+        return source.replaceAll(
+                "(?i)" + Pattern.quote(target),
+                Matcher.quoteReplacement(replacement));
     }
 
     private String normalizeFollowUpPrefix(String question) {
-        String normalized = normalize(question);
-        normalized = normalized.replaceFirst("^(那|那么|这个|它|还有|也)[，,、\\s]*", "");
+        String normalized = normalize(question)
+                .replaceFirst("^(那|那么|这个|它|还有|继续|接着)[，,。\\s]*", "");
         return normalized.isBlank() ? question : normalized;
     }
 
-    private String lastUserQuestion(List<Map<String, String>> history) {
+    private String lastContextQuestion(List<Map<String, String>> history) {
         if (history == null || history.isEmpty()) {
             return "";
         }
+        String fallback = "";
         for (int i = history.size() - 1; i >= 0; i--) {
             Map<String, String> item = history.get(i);
             if (item == null || !"user".equals(item.get("role"))) {
                 continue;
             }
             String content = normalize(item.get("content"));
-            if (!content.isBlank()) {
+            if (content.isBlank() || isSelfContainedShortQuestion(content)) {
+                continue;
+            }
+            if (fallback.isBlank()) {
+                fallback = content;
+            }
+            if (content.length() > 8 || CONTEXT_ANCHOR_PATTERN.matcher(content).matches()) {
                 return content;
             }
         }
-        return "";
+        return fallback;
     }
 
     private String normalize(String value) {
-        if (value == null) {
-            return "";
-        }
-        return value.replaceAll("\\s+", " ").trim();
+        return value == null ? "" : value.replaceAll("\\s+", " ").trim();
     }
 
     private String truncate(String value, int maxChars) {
@@ -273,6 +403,9 @@ public class QueryRewriteService {
     }
 
     private record RewriteCandidate(String query, String method, String reason) {
+    }
+
+    private record TopicGroup(String canonical, List<String> aliases) {
     }
 
     public record RewriteResult(String originalQuery,

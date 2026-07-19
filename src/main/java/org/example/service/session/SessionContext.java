@@ -7,6 +7,7 @@ public record SessionContext(
         String username,
         String sessionId,
         LocalDateTime createTime,
-        int messagePairCount
+        int messagePairCount,
+        boolean hasSemanticMemory
 ) {
 }

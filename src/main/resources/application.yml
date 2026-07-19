@@ -116,6 +116,15 @@ ai:
       metrics-query: balanced
       ambiguous: balanced
       alert-diagnosis: reasoning
+    intent-max-token:
+      chitchat: 256
+      time-query: 128
+      system-operation: 256
+      knowledge-qa: 600
+      log-query: 500
+      metrics-query: 400
+      ambiguous: 500
+      alert-diagnosis: 8000
     task:
       intent-classification: fast
       query-rewrite: fast
@@ -192,6 +201,7 @@ session:
     compression-min-messages: 2
     llm-context-window: 10
     semantic-top-k: 3
+    semantic-search-timeout: 3s
     db-page-size: 20
 
 persona:

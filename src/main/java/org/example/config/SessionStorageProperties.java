@@ -18,6 +18,7 @@ public class SessionStorageProperties {
     private int compressionMinMessages = 2;
     private int llmContextWindow = 10;
     private int semanticTopK = 3;
+    private Duration semanticSearchTimeout = Duration.ofSeconds(3);
     private int dbPageSize = 20;
     private String personaPath = "./data/personas";
 
@@ -47,6 +48,10 @@ public class SessionStorageProperties {
 
     public void setSemanticTopK(int semanticTopK) {
         this.semanticTopK = semanticTopK;
+    }
+
+    public void setSemanticSearchTimeout(Duration semanticSearchTimeout) {
+        this.semanticSearchTimeout = semanticSearchTimeout;
     }
 
     public void setDbPageSize(int dbPageSize) {

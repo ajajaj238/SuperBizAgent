@@ -49,6 +49,7 @@ public class ChatService {
     private static final String ANSWER_PRESENTATION_RULES = """
             回答呈现要求：
             - 只回答用户当前问题，不要解释系统内部处理过程。
+            - 用户问题简短时，答案优先控制在 300 到 500 个中文字符，避免重复背景和无关延伸；用户明确要求详细说明时除外。
             - 不要提到“闲聊模式”“知识库模式”“意图识别”“用户画像”“RAG”“检索结果”“工具选择”等内部术语。
             - 用户画像、历史对话、知识库参考只作为静默参考；不要说“根据你的画像”“根据内部知识库参考”等。
             - 如果用户问“我是谁”，只能依据明确的姓名、职业、角色、职责等身份信息回答。
@@ -461,11 +462,27 @@ public class ChatService {
                                        List<String> semanticMemories,
                                        String question,
                                        boolean enableRag) {
+        return buildAgentUserPrompt(history, semanticMemories, question, enableRag, null);
+    }
+
+    public String buildAgentUserPrompt(List<Map<String, String>> history,
+                                       List<String> semanticMemories,
+                                       String question,
+                                       boolean enableRag,
+                                       QueryRewriteService.RewriteResult rewriteResult) {
         String safeQuestion = promptSecurityService.sanitizeForPrompt(question, "current_question");
         String safeHistory = buildSafeHistoryBlock(pruneHistoryForCurrentQuestion(history, safeQuestion), safeQuestion);
         String safeMemories = buildSafeSemanticMemoryBlock(semanticMemories);
 
-        String promptBody = enableRag ? enrichQuestionWithRagContext(safeQuestion, history) : safeQuestion;
+        String promptBody;
+        if (enableRag) {
+            promptBody = enrichQuestionWithRagContext(safeQuestion, history, rewriteResult);
+        } else if (rewriteResult != null && rewriteResult.rewritten()) {
+            promptBody = promptSecurityService.sanitizeForPrompt(
+                    rewriteResult.rewrittenQuery(), "rewritten_question");
+        } else {
+            promptBody = safeQuestion;
+        }
         if (safeHistory.isBlank() && safeMemories.isBlank()) {
             return promptBody;
         }
@@ -500,10 +517,18 @@ public class ChatService {
     }
 
     public String enrichQuestionWithRagContext(String question, List<Map<String, String>> history) {
+        return enrichQuestionWithRagContext(question, history, null);
+    }
+
+    public String enrichQuestionWithRagContext(
+            String question,
+            List<Map<String, String>> history,
+            QueryRewriteService.RewriteResult precomputedRewrite) {
         try {
             int candidateTopK = ragRerankService.isRerankEnabled() ? Math.max(topK, rerankCandidateTopK) : topK;
-            QueryRewriteService.RewriteResult rewriteResult =
-                    queryRewriteService.rewriteForRetrieval(question, history);
+            QueryRewriteService.RewriteResult rewriteResult = precomputedRewrite == null
+                    ? queryRewriteService.rewriteForRetrieval(question, history)
+                    : precomputedRewrite;
 
             List<VectorSearchService.SearchResult> candidates = searchRagCandidates(rewriteResult, candidateTopK);
 

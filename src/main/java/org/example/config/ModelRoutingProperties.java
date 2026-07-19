@@ -22,6 +22,7 @@ public class ModelRoutingProperties {
 
     private Map<String, String> intent = new HashMap<>();
     private Map<String, String> task = new HashMap<>();
+    private Map<String, Integer> intentMaxToken = new HashMap<>();
 
     public void setFastModel(String fastModel) {
         this.fastModel = fastModel;
@@ -53,6 +54,10 @@ public class ModelRoutingProperties {
 
     public void setTask(Map<String, String> task) {
         this.task = task == null ? new HashMap<>() : task;
+    }
+
+    public void setIntentMaxToken(Map<String, Integer> intentMaxToken) {
+        this.intentMaxToken = intentMaxToken == null ? new HashMap<>() : intentMaxToken;
     }
 
     @Getter
