@@ -171,6 +171,79 @@ rag:
     keyword-weight: 0.3  # 关键词覆盖率权重
     min-relevance-score: 0.22  # 最低相关阈值（低于该分值会被过滤）
 
+# QA 答案缓存（分离式架构：Milvus 存问题，Redis 存答案）
+qa-cache:
+  enabled: true
+  # 语义召回阈值。实测 text-embedding-v4 上同义改写与跨主题相似度重叠在 0.85 左右，
+  # 单靠余弦阈值无法兼顾召回与精确，故降到 0.80 做召回，由 subject-check 保证精确
+  similarity-threshold: 0.80
+  recall-threshold: 0.70  # Milvus 候选召回阈值（宽松），精确判定交给 rerank
+  merge-answer-check-enabled: true  # 写侧归并前校验答案相似度，防止并错 cluster
+  answer-similarity-threshold: 0.90
+  rerank:
+    enabled: true  # 语义路径用百炼 qwen3-rerank 精排；失败时降级为余弦+主题校验
+    model: qwen3-rerank
+    base-url: https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank
+    instruct: "Retrieve semantically similar text."  # 语义等价模式，实测显著拉开边界分差
+    threshold: 0.72  # rerank 命中阈值，建议用评测集校准
+    top-n: 5
+    timeout-ms: 5000
+  subject-check-enabled: true  # 主题一致性校验：内存≠CPU，防止跨主题误命中
+  ask-type-check-enabled: true  # 诉求类型一致性：原因≠解决，防止同主题不同诉求共用缓存
+  subject-words:
+    - 内存
+    - 磁盘
+    - 硬盘
+    - 文件
+    - 日志
+    - 服务
+    - 数据库
+    - 网络
+    - 网关
+    - 接口
+    - 线程
+    - 连接池
+    - 连接
+    - 缓存
+    - 容器
+    - 集群
+    - 节点
+    - 应用
+    - 进程
+    - 队列
+    - 索引
+    - 监控
+    - 告警
+    - 阈值
+    - 时区
+    - 链路
+    - 熔断
+    - 限流
+    - 雪崩
+    - 故障
+    - 负载
+    - 请求
+    - 响应
+    - 大模型
+    - 向量
+    - 会话
+  redis-ttl: 7d  # 答案 TTL；aiops-docs/uploads 文档变更时会主动失效
+  min-question-length: 4
+  max-question-length: 200
+  intent-check-enabled: true  # 语义检索路径上复用 embedding 意图做二次闸门
+  intent-threshold: 0.85
+  async-save: true  # 首次回答后异步落缓存，不阻塞响应
+  max-answer-length: 8000
+  evaluation:
+    enabled: false  # 需要校准阈值时打开，启动后自动跑评测并输出建议阈值
+    dataset-location: classpath:qa-cache-eval.json
+
+# Query Rewrite 离线评测（需要真实 LLM 改写调用，默认关闭）
+rewrite:
+  evaluation:
+    enabled: false
+    dataset-location: classpath:rewrite-eval.json
+
 # Prometheus 配置
 prometheus:
   base-url: http://localhost:9090

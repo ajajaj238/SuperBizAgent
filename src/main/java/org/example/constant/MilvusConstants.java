@@ -21,6 +21,11 @@ public class MilvusConstants {
      * 用户长期语义记忆集合
      */
     public static final String USER_MEMORIES_COLLECTION_NAME = "user_memories";
+
+    /**
+     * QA 答案缓存问题集合（分离式缓存：问题存 Milvus，答案存 Redis）
+     */
+    public static final String QA_CACHE_COLLECTION_NAME = "qa_cache";
     
     /**
      * 向量维度（豆包 embedding 模型的维度）
@@ -56,6 +61,16 @@ public class MilvusConstants {
      * 用户语义记忆文本最大长度
      */
     public static final int USER_MEMORY_MAX_LENGTH = 2048;
+
+    /**
+     * 缓存问题文本最大长度
+     */
+    public static final int QA_CACHE_QUESTION_MAX_LENGTH = 512;
+
+    /**
+     * 缓存键（问题 MD5）最大长度
+     */
+    public static final int QA_CACHE_KEY_MAX_LENGTH = 64;
     
     /**
      * 默认分片数

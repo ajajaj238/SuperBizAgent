@@ -96,10 +96,20 @@ public class VectorSearchService {
     }
 
     public List<IntentSearchResult> searchIntentExamples(String query, int topK) {
+        return searchIntentExamples(query, topK, null);
+    }
+
+    /**
+     * Search intent examples with an optional precomputed query vector
+     * to avoid a duplicate embedding API call.
+     */
+    public List<IntentSearchResult> searchIntentExamples(String query, int topK, List<Float> precomputedVector) {
         try {
             logger.info("开始搜索意图示例, 查询: {}, topK: {}", query, topK);
 
-            List<Float> queryVector = embeddingService.generateQueryVector(query);
+            List<Float> queryVector = precomputedVector != null
+                    ? precomputedVector
+                    : embeddingService.generateQueryVector(query);
 
             R<RpcStatus> loadResponse = milvusClient.loadCollection(
                     LoadCollectionParam.newBuilder()

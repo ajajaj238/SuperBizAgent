@@ -182,7 +182,7 @@ public class ChatService {
         
         // 基础系统提示
         systemPromptBuilder.append("你是一个专业的智能助手，可以获取当前时间、查询天气信息、搜索内部文档知识库，以及查询 Prometheus 告警信息。\n");
-        systemPromptBuilder.append("当用户询问时间相关问题时，使用 getCurrentDateTime 工具。\n");
+        systemPromptBuilder.append("当用户询问当前时间、日期等时间相关问题时，必须调用 getCurrentDateTime 工具获取，严禁凭记忆回答时间。\n");
         systemPromptBuilder.append("当用户需要查询公司内部文档、流程、最佳实践或技术指南时，使用 queryInternalDocs 工具。\n");
         systemPromptBuilder.append("当用户需要查询 Prometheus 告警、监控指标或系统告警状态时，使用 queryPrometheusAlerts 工具。\n");
         systemPromptBuilder.append("当用户需要查询腾讯云日志时，请调用腾讯云mcp服务查询,默认查询地域ap-guangzhou,查询时间范围为近一个月。\n\n");
@@ -463,6 +463,13 @@ public class ChatService {
                                        String question,
                                        boolean enableRag) {
         return buildAgentUserPrompt(history, semanticMemories, question, enableRag, null);
+    }
+
+    /**
+     * 时间类问题直接返回系统时间（不经过 LLM，杜绝时间幻觉）。
+     */
+    public String currentTimeAnswer() {
+        return "当前时间是 " + dateTimeTools.getCurrentDateTimeFormatted() + "。";
     }
 
     public String buildAgentUserPrompt(List<Map<String, String>> history,

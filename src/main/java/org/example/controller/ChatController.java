@@ -13,6 +13,7 @@ import org.example.monitor.TokenUsageRecorder;
 import org.example.service.AiOpsService;
 import org.example.service.ChatService;
 import org.example.service.ModelRoutingService;
+import org.example.service.QaCacheService;
 import org.example.service.QueryRewriteService;
 import org.example.config.UserContext;
 import org.example.entity.SessionIndex;
@@ -74,6 +75,9 @@ public class ChatController {
     @Autowired
     private QueryRewriteService queryRewriteService;
 
+    @Autowired
+    private QaCacheService qaCacheService;
+
     private final ExecutorService executor = new ThreadPoolExecutor(
             4, 20, 60L, TimeUnit.SECONDS,
             new LinkedBlockingQueue<>(256),
@@ -102,6 +106,19 @@ public class ChatController {
             List<Map<String, String>> history = persistentSessionService.getRecentHistory(session);
             QueryRewriteService.RewriteResult rewriteResult =
                     queryRewriteService.rewriteForRetrieval(request.getQuestion(), history);
+
+            // QA 答案缓存：改写过的追问不参与缓存，全部走 LLM；仅未改写问题命中时直接返回
+            if (!rewriteResult.rewritten()) {
+                QaCacheService.CacheLookupResult cacheHit = qaCacheService.lookup(request.getQuestion());
+                if (cacheHit != null) {
+                    persistentSessionService.appendConversation(session, request.getQuestion(), cacheHit.answer(), chatService);
+                    tokenUsageRecorder.completeConversationSuccess(cacheHit.answer().length());
+                    logger.info("QA缓存命中并返回 - SessionId: {}, matchedQuestion: {}, type: {}, answerLength: {}",
+                            request.getId(), cacheHit.matchedQuestion(), cacheHit.matchType(), cacheHit.answer().length());
+                    return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(cacheHit.answer())));
+                }
+            }
+
             String contextualQuestion = rewriteResult.rewritten()
                     ? rewriteResult.rewrittenQuery()
                     : request.getQuestion();
@@ -120,6 +137,15 @@ public class ChatController {
             if (intentResult.getIntent() == UserIntent.SYSTEM_OPERATION) {
                 String answer = handleSystemOperation(session);
                 tokenUsageRecorder.completeConversationSuccess(answer.length());
+                return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(answer)));
+            }
+
+            if (intentResult.getIntent() == UserIntent.TIME_QUERY) {
+                // 时间问题直接返回系统时间，不经过 LLM，避免时间幻觉
+                String answer = chatService.currentTimeAnswer();
+                persistentSessionService.appendConversation(session, request.getQuestion(), answer, chatService);
+                tokenUsageRecorder.completeConversationSuccess(answer.length());
+                logger.info("时间问题直接返回系统时间 - SessionId: {}, answer: {}", session.sessionId(), answer);
                 return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(answer)));
             }
 
@@ -176,6 +202,10 @@ public class ChatController {
 
             // 更新会话历史
             int pairCount = persistentSessionService.appendConversation(session, request.getQuestion(), fullAnswer, chatService);
+            // QA 答案缓存：改写过的追问不落缓存，仅未改写完整问题异步落缓存
+            if (!rewriteResult.rewritten()) {
+                qaCacheService.trySave(request.getQuestion(), request.getQuestion(), fullAnswer, intentResult.getIntent());
+            }
             logger.info("已提交会话异步保存 - SessionId: {}, 估算消息对数: {}",
                     session.sessionId(), pairCount);
             tokenUsageRecorder.completeConversationSuccess(fullAnswer.length());
@@ -252,6 +282,29 @@ public class ChatController {
                 List<Map<String, String>> history = persistentSessionService.getRecentHistory(session);
                 QueryRewriteService.RewriteResult rewriteResult =
                         queryRewriteService.rewriteForRetrieval(request.getQuestion(), history);
+
+                // QA 答案缓存：改写过的追问不参与缓存，全部走 LLM；仅未改写问题命中时流式返回
+                if (!rewriteResult.rewritten()) {
+                    QaCacheService.CacheLookupResult cacheHit = qaCacheService.lookup(request.getQuestion());
+                    if (cacheHit != null) {
+                        persistentSessionService.appendConversation(session, request.getQuestion(), cacheHit.answer(), chatService);
+                        tokenUsageRecorder.completeConversationSuccess(cacheHit.answer().length());
+                        logger.info("QA缓存命中并流式返回 - SessionId: {}, matchedQuestion: {}, type: {}, answerLength: {}",
+                                request.getId(), cacheHit.matchedQuestion(), cacheHit.matchType(), cacheHit.answer().length());
+                        String cachedAnswer = cacheHit.answer();
+                        int chunkSize = 50;
+                        for (int i = 0; i < cachedAnswer.length(); i += chunkSize) {
+                            int end = Math.min(i + chunkSize, cachedAnswer.length());
+                            emitter.send(SseEmitter.event()
+                                    .name("message")
+                                    .data(SseMessage.content(cachedAnswer.substring(i, end)), MediaType.APPLICATION_JSON));
+                        }
+                        emitter.send(SseEmitter.event().name("message").data(SseMessage.done(), MediaType.APPLICATION_JSON));
+                        emitter.complete();
+                        return;
+                    }
+                }
+
                 String contextualQuestion = rewriteResult.rewritten()
                         ? rewriteResult.rewrittenQuery()
                         : request.getQuestion();
@@ -267,6 +320,21 @@ public class ChatController {
                             .name("message")
                             .data(SseMessage.content(answer), MediaType.APPLICATION_JSON));
                     tokenUsageRecorder.completeConversationSuccess(answer.length());
+                    emitter.send(SseEmitter.event()
+                            .name("message")
+                            .data(SseMessage.done(), MediaType.APPLICATION_JSON));
+                    emitter.complete();
+                    return;
+                }
+
+                if (intentResult.getIntent() == UserIntent.TIME_QUERY) {
+                    String answer = chatService.currentTimeAnswer();
+                    persistentSessionService.appendConversation(session, request.getQuestion(), answer, chatService);
+                    tokenUsageRecorder.completeConversationSuccess(answer.length());
+                    logger.info("时间问题直接返回系统时间 - SessionId: {}, answer: {}", session.sessionId(), answer);
+                    emitter.send(SseEmitter.event()
+                            .name("message")
+                            .data(SseMessage.content(answer), MediaType.APPLICATION_JSON));
                     emitter.send(SseEmitter.event()
                             .name("message")
                             .data(SseMessage.done(), MediaType.APPLICATION_JSON));
@@ -401,6 +469,11 @@ public class ChatController {
 
                                 // 更新会话历史
                                 int pairCount = persistentSessionService.appendConversation(session, request.getQuestion(), fullAnswer, chatService);
+                                // QA 答案缓存：改写过的追问不落缓存，仅未改写完整问题异步落缓存
+                                if (!rewriteResult.rewritten()) {
+                                    qaCacheService.trySave(request.getQuestion(), request.getQuestion(),
+                                            fullAnswer, intentResult.getIntent());
+                                }
                                 logger.info("已提交会话异步保存 - SessionId: {}, 估算消息对数: {}",
                                         session.sessionId(), pairCount);
                                 tokenUsageRecorder.completeConversationSuccess(fullAnswer.length());

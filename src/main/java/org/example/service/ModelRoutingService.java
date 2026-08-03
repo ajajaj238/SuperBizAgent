@@ -51,6 +51,7 @@ public class ModelRoutingService {
                 .build();
     }
 
+
     private Tier defaultTierForIntent(UserIntent intent) {
         if (intent == null) {
             return Tier.BALANCED;

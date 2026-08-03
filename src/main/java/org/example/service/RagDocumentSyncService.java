@@ -4,6 +4,7 @@ import org.example.config.RagSyncProperties;
 import org.example.service.RagDocumentIndexStore.RagDocumentRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -31,6 +32,9 @@ public class RagDocumentSyncService {
     private final RagDocumentIndexStore indexStore;
     private final VectorIndexService vectorIndexService;
     private final AtomicBoolean running = new AtomicBoolean(false);
+
+    @Autowired(required = false)
+    private QaCacheService qaCacheService;
 
     public RagDocumentSyncService(RagSyncProperties properties,
                                   RagDocumentIndexStore indexStore,
@@ -92,6 +96,12 @@ public class RagDocumentSyncService {
             }
         }
 
+        if (result.getAdded() > 0 || result.getUpdated() > 0 || result.getDeleted() > 0) {
+            if (qaCacheService != null) {
+                qaCacheService.invalidateAll();
+            }
+        }
+
         indexStore.saveAll(records);
         result.durationMs = Duration.between(startedAt, Instant.now()).toMillis();
         syncLogger.info(
@@ -105,6 +115,11 @@ public class RagDocumentSyncService {
         Map<String, RagDocumentRecord> records = indexStore.loadAll();
         SyncResult result = new SyncResult();
         syncFile(filePath.normalize(), records, new HashSet<>(), result);
+        if (result.getAdded() > 0 || result.getUpdated() > 0) {
+            if (qaCacheService != null) {
+                qaCacheService.invalidateAll();
+            }
+        }
         indexStore.saveAll(records);
     }
 

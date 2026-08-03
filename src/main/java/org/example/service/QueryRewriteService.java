@@ -35,15 +35,22 @@ public class QueryRewriteService {
     private static final Logger rewriteLogger = LoggerFactory.getLogger("ai.query.rewrite");
     private static final int MAX_CONTEXT_CHARS = 80;
     private static final int MAX_REWRITTEN_CHARS = 160;
-    private static final Pattern FOLLOW_UP_PATTERN = Pattern.compile(
-            ".*(呢|那|那么|这个|它呢|还有|也一样|怎么办|继续|接着).*");
+    /**
+     * 长度 8-16 的追问信号：仅对话性 cue（"怎么办"这类完整诉求不算跟进信号）
+     */
+    private static final Pattern FOLLOW_UP_CUE_PATTERN = Pattern.compile(
+            ".*(呢|那|那么|这个|它呢|还有|也一样|继续|接着|和.*比|相比|对比).*");
     private static final Pattern CONTEXT_ANCHOR_PATTERN = Pattern.compile(
             ".*(怎么|如何|处理|排查|原因|解决|查询|告警|飙高|过高|异常|报错).*");
+    private static final Pattern COMPLETE_INTENT_SUFFIX = Pattern.compile(
+            "(怎么办|怎么处理|怎么排查|怎么解决|怎么定位|怎么优化|如何处理|如何排查|如何解决|如何优化|是什么|有哪些|什么原因|什么情况)$");
     private static final List<TopicGroup> TOPIC_GROUPS = List.of(
             new TopicGroup("CPU", List.of("cpu", "处理器")),
             new TopicGroup("内存", List.of("内存", "memory", "ram")),
             new TopicGroup("磁盘", List.of("磁盘", "硬盘", "disk")),
             new TopicGroup("网络", List.of("网络", "带宽", "network")),
+            new TopicGroup("服务", List.of("服务", "service")),
+            new TopicGroup("网关", List.of("网关", "gateway")),
             new TopicGroup("数据库", List.of("数据库", "database")),
             new TopicGroup("Redis", List.of("redis")),
             new TopicGroup("MySQL", List.of("mysql")),
@@ -238,13 +245,16 @@ public class QueryRewriteService {
 
     private boolean shouldRewrite(String question) {
         String normalized = normalize(question);
+        if (isLikelyCompleteShortQuestion(normalized)) {
+            return false;
+        }
         if (normalized.length() <= 8) {
             return true;
         }
         if (startsWithFollowUpCue(normalized)) {
             return true;
         }
-        return normalized.length() <= 16 && FOLLOW_UP_PATTERN.matcher(normalized).matches();
+        return normalized.length() <= 16 && FOLLOW_UP_CUE_PATTERN.matcher(normalized).matches();
     }
 
     private boolean startsWithFollowUpCue(String question) {
@@ -260,9 +270,29 @@ public class QueryRewriteService {
     private boolean isSelfContainedShortQuestion(String question) {
         String normalized = normalize(question).toLowerCase();
         return normalized.matches(".*(你是谁|你叫什么|我是谁|我叫什么|介绍一下自己|你能做什么).*")
-                || normalized.matches(".*(现在几点|当前时间|今天几号|今天日期|星期几|周几).*")
+                || normalized.matches(".*(现在几点|当前时间|今天几号|今天日期|星期几|周几|时间).*")
                 || normalized.matches(".*(清空历史|删除会话|开始新对话|重置会话).*")
-                || normalized.matches("^(你好|您好|hello|hi|嗨|谢谢|感谢|再见|拜拜)[!！。\\s]*$");
+                || normalized.matches("^(你好|您好|hello|hi|嗨|谢谢|感谢|再见|拜拜|好的|知道了|明白|嗯|好)[!！。，,\\s、]*$")
+                || normalized.matches("^(好的|嗯|嗯嗯|知道了|明白了)[，,、\\s]*(谢谢|感谢|好的)?[!！。，,\\s]*$");
+    }
+
+    /**
+     * 判断是否为"已完整"的短问题（含主题词 + 完整诉求结尾），避免被误改写。
+     * 例如"磁盘满了怎么办"完整不改写；"内存呢""它怎么解决"仍需改写。
+     */
+    private boolean isLikelyCompleteShortQuestion(String question) {
+        String normalized = normalize(question).toLowerCase(Locale.ROOT);
+        if (normalized.length() > 12) {
+            return false;
+        }
+        if (!COMPLETE_INTENT_SUFFIX.matcher(normalized).find()) {
+            return false;
+        }
+        return !topicsIn(normalized).isEmpty() || containsAlnumWord(normalized);
+    }
+
+    private boolean containsAlnumWord(String text) {
+        return Pattern.compile("[a-z0-9]{2,}").matcher(text).find();
     }
 
     private String buildStandaloneQuery(String previousUserQuestion, String question) {

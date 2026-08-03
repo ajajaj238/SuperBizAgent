@@ -2,6 +2,8 @@ package org.example.client;
 
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.DataType;
+import io.milvus.grpc.DescribeCollectionResponse;
+import io.milvus.grpc.FieldSchema;
 import io.milvus.param.ConnectParam;
 import io.milvus.param.IndexType;
 import io.milvus.param.MetricType;
@@ -62,6 +64,7 @@ public class MilvusClientFactory {
 
             initializeIntentExamplesCollection(client);
             initializeUserMemoriesCollection(client);
+            initializeQaCacheCollection(client);
 
             return client;
 
@@ -415,6 +418,153 @@ public class MilvusClientFactory {
                 return;
             }
             throw new RuntimeException("创建 user_memories.embedding 索引失败: " + response.getMessage());
+        }
+    }
+
+    private void initializeQaCacheCollection(MilvusServiceClient client) {
+        int maxAttempts = 3;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                if (!collectionExists(client, MilvusConstants.QA_CACHE_COLLECTION_NAME)) {
+                    logger.info("collection '{}' 不存在，正在创建... attempt={}/{}",
+                            MilvusConstants.QA_CACHE_COLLECTION_NAME, attempt, maxAttempts);
+                    createQaCacheCollection(client);
+                    logger.info("成功创建 collection '{}'", MilvusConstants.QA_CACHE_COLLECTION_NAME);
+                } else if (!hasCacheIdField(client)) {
+                    // schema 升级：旧集合没有 cache_id 字段，删除重建（缓存数据可再生成）
+                    logger.warn("qa_cache 集合缺少 cache_id 字段，删除重建以升级 schema（旧缓存数据作废，可自动重建）");
+                    R<RpcStatus> drop = client.dropCollection(DropCollectionParam.newBuilder()
+                            .withCollectionName(MilvusConstants.QA_CACHE_COLLECTION_NAME)
+                            .build());
+                    if (drop.getStatus() != 0) {
+                        throw new RuntimeException("删除旧 qa_cache 集合失败: " + drop.getMessage());
+                    }
+                    createQaCacheCollection(client);
+                    logger.info("qa_cache 集合已按新 schema 重建");
+                } else {
+                    logger.info("collection '{}' 已存在", MilvusConstants.QA_CACHE_COLLECTION_NAME);
+                }
+
+                createQaCacheIndex(client);
+                logger.info("成功创建或确认 qa_cache 索引");
+                return;
+            } catch (Exception e) {
+                if (attempt == maxAttempts) {
+                    logger.warn("qa_cache 初始化失败，应用将继续启动，答案缓存会自动降级: {}", e.getMessage());
+                    return;
+                }
+                logger.warn("qa_cache 初始化失败，准备重试: attempt={}/{}, error={}",
+                        attempt, maxAttempts, e.getMessage());
+                sleepBeforeRetry(attempt);
+            }
+        }
+    }
+
+    /**
+     * 检查 qa_cache 集合是否包含 cache_id 字段（区分新旧 schema）
+     */
+    private boolean hasCacheIdField(MilvusServiceClient client) {
+        try {
+            R<DescribeCollectionResponse> response = client.describeCollection(
+                    DescribeCollectionParam.newBuilder()
+                            .withCollectionName(MilvusConstants.QA_CACHE_COLLECTION_NAME)
+                            .build());
+            if (response.getStatus() != 0 || response.getData() == null) {
+                logger.warn("describe qa_cache 失败，按最新 schema 处理: {}", response.getMessage());
+                return true;
+            }
+            for (FieldSchema field : response.getData().getSchema().getFieldsList()) {
+                if ("cache_id".equals(field.getName())) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (Exception e) {
+            logger.warn("describe qa_cache 异常，按最新 schema 处理: {}", e.getMessage());
+            return true;
+        }
+    }
+
+    private void createQaCacheCollection(MilvusServiceClient client) {
+        FieldType idField = FieldType.newBuilder()
+                .withName("id")
+                .withDataType(DataType.VarChar)
+                .withMaxLength(MilvusConstants.QA_CACHE_KEY_MAX_LENGTH)
+                .withPrimaryKey(true)
+                .build();
+
+        FieldType questionField = FieldType.newBuilder()
+                .withName("question")
+                .withDataType(DataType.VarChar)
+                .withMaxLength(MilvusConstants.QA_CACHE_QUESTION_MAX_LENGTH)
+                .build();
+
+        FieldType cacheIdField = FieldType.newBuilder()
+                .withName("cache_id")
+                .withDataType(DataType.VarChar)
+                .withMaxLength(MilvusConstants.QA_CACHE_KEY_MAX_LENGTH)
+                .build();
+
+        FieldType hitCountField = FieldType.newBuilder()
+                .withName("hit_count")
+                .withDataType(DataType.Int64)
+                .build();
+
+        FieldType createdAtField = FieldType.newBuilder()
+                .withName("created_at")
+                .withDataType(DataType.Int64)
+                .build();
+
+        FieldType embeddingField = FieldType.newBuilder()
+                .withName("embedding")
+                .withDataType(DataType.FloatVector)
+                .withDimension(MilvusConstants.VECTOR_DIM)
+                .build();
+
+        CollectionSchemaParam schema = CollectionSchemaParam.newBuilder()
+                .withEnableDynamicField(false)
+                .addFieldType(idField)
+                .addFieldType(questionField)
+                .addFieldType(cacheIdField)
+                .addFieldType(hitCountField)
+                .addFieldType(createdAtField)
+                .addFieldType(embeddingField)
+                .build();
+
+        CreateCollectionParam createParam = CreateCollectionParam.newBuilder()
+                .withCollectionName(MilvusConstants.QA_CACHE_COLLECTION_NAME)
+                .withDescription("QA answer cache question collection")
+                .withSchema(schema)
+                .withShardsNum(MilvusConstants.DEFAULT_SHARD_NUMBER)
+                .build();
+
+        R<RpcStatus> response = client.createCollection(createParam);
+        if (response.getStatus() != 0) {
+            if (isAlreadyExistsError(response.getMessage())) {
+                logger.info("qa_cache collection 已存在，跳过创建");
+                return;
+            }
+            throw new RuntimeException("创建 qa_cache collection 失败: " + response.getMessage());
+        }
+    }
+
+    private void createQaCacheIndex(MilvusServiceClient client) {
+        CreateIndexParam indexParam = CreateIndexParam.newBuilder()
+                .withCollectionName(MilvusConstants.QA_CACHE_COLLECTION_NAME)
+                .withFieldName("embedding")
+                .withIndexType(IndexType.IVF_FLAT)
+                .withMetricType(MetricType.COSINE)
+                .withExtraParam("{\"nlist\":68}")
+                .withSyncMode(Boolean.FALSE)
+                .build();
+
+        R<RpcStatus> response = client.createIndex(indexParam);
+        if (response.getStatus() != 0) {
+            if (isAlreadyExistsError(response.getMessage())) {
+                logger.info("qa_cache.embedding 索引已存在，跳过创建");
+                return;
+            }
+            throw new RuntimeException("创建 qa_cache.embedding 索引失败: " + response.getMessage());
         }
     }
 }
